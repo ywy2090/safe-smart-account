@@ -5,12 +5,16 @@ import {IERC165} from "../../interfaces/IERC165.sol";
 import {ISafe, MarshalLib, ExtensibleBase} from "./ExtensibleBase.sol";
 
 interface IERC165Handler {
+    // 查询某 Safe 是否声明支持指定接口。
     function safeInterfaces(ISafe safe, bytes4 interfaceId) external view returns (bool);
 
+    // 由 Safe 自调用，设置单个接口支持状态。
     function setSupportedInterface(bytes4 interfaceId, bool supported) external;
 
+    // 批量注册 interface 的 selector -> handler 路由，并校验 interfaceId。
     function addSupportedInterfaceBatch(bytes4 interfaceId, bytes32[] calldata handlerWithSelectors) external;
 
+    // 批量移除 interface 的 selector 路由，并同步取消接口声明。
     function removeSupportedInterfaceBatch(bytes4 interfaceId, bytes4[] calldata selectors) external;
 }
 
@@ -33,7 +37,7 @@ abstract contract ERC165Handler is ExtensibleBase, IERC165Handler {
      */
     function setSupportedInterface(bytes4 interfaceId, bool supported) public override onlySelf {
         ISafe safe = ISafe(payable(_manager()));
-        // invalid interface id per ERC165 spec
+        // ERC-165 保留值，必须拒绝。
         require(interfaceId != 0xffffffff, "invalid interface id");
         mapping(bytes4 => bool) storage safeInterface = safeInterfaces[safe];
         bool current = safeInterface[interfaceId];
@@ -57,6 +61,7 @@ abstract contract ERC165Handler is ExtensibleBase, IERC165Handler {
         bytes4 interfaceId = bytes4(0);
         uint256 len = handlerWithSelectors.length;
         for (uint256 i = 0; i < len; ++i) {
+            // interfaceId = 所有函数 selector 的 XOR（ERC-165 规则）。
             (bool isStatic, bytes4 selector, address handlerAddress) = MarshalLib.decodeWithSelector(handlerWithSelectors[i]);
             _setSafeMethod(safe, selector, MarshalLib.encode(isStatic, handlerAddress));
             interfaceId ^= selector;
@@ -76,6 +81,7 @@ abstract contract ERC165Handler is ExtensibleBase, IERC165Handler {
         bytes4 interfaceId = bytes4(0);
         uint256 len = selectors.length;
         for (uint256 i = 0; i < len; ++i) {
+            // 清空 selector 路由（设为 bytes32(0) 等价禁用）。
             _setSafeMethod(safe, selectors[i], bytes32(0));
             interfaceId ^= selectors[i];
         }
@@ -91,6 +97,7 @@ abstract contract ERC165Handler is ExtensibleBase, IERC165Handler {
      * @return True if the interface is supported
      */
     function supportsInterface(bytes4 interfaceId) external view returns (bool) {
+        // 顺序：标准接口 -> 子类扩展接口 -> Safe 运行时配置接口。
         return
             interfaceId == type(IERC165).interfaceId ||
             interfaceId == type(IERC165Handler).interfaceId ||

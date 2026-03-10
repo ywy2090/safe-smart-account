@@ -8,9 +8,8 @@ import {Safe, Enum} from "./Safe.sol";
 
 /**
  * @title SafeL2
- * @notice An implementation of the Safe contract that emits additional events on transaction executions.
- * @dev This contract allows indexing of Safe accounts even on chains without good tracing support, at the cost of additional gas for emitting the events.
- *      For a more complete description of the Safe account, please refer to the main {Safe} contract.
+ * @notice 在 Safe 基础上增加交易级别事件：execTransaction 前发出 SafeMultiSigTransaction，execTransactionFromModule 前发出 SafeModuleTransaction，便于在无链上追踪的网络上索引 Safe 活动。
+ * @dev 多出的 gas 消耗来自事件数据；完整行为与概念见 {Safe}。
  * @author Stefan George - @Georgi87
  * @author Richard Meissner - @rmeissner
  */

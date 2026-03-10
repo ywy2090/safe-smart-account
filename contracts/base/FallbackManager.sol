@@ -8,16 +8,17 @@ import {FALLBACK_HANDLER_STORAGE_SLOT} from "../libraries/SafeStorage.sol";
 
 /**
  * @title Fallback Manager
- * @notice A contract managing fallback calls made to this contract.
+ * @notice 管理对 Safe 的未知调用（fallback）：将调用转发到已设置的 handler，并在 calldata 末尾附加 msg.sender（20 字节）。
+ * @dev handler 存于固定 storage slot，避免与 Safe 自身存储布局冲突。不能将 handler 设为 address(this)，否则可能被短 calldata 伪造函数签名攻击。
  * @author Richard Meissner - @rmeissner
  */
 abstract contract FallbackManager is SelfAuthorized, IFallbackManager {
     /**
-     * @notice Internal function to set the fallback handler.
-     * @param handler Contract to handle fallback calls.
+     * @notice 内部设置 fallback 处理器（setup 或 setFallbackHandler 调用）。
+     * @param handler 处理 fallback 的合约地址；不能为 address(this)。
      */
     function internalSetFallbackHandler(address handler) internal {
-        // If a fallback handler is set to `this`, then the following attack vector is opened:
+        // 若 handler == this，攻击者可构造 3 字节 calldata + 攻击者地址 1 字节，拼成 4 字节函数选择器，误调 Safe 内部方法
         // Imagine we have a function like this:
         //
         //         function withdraw() internal authorized {
@@ -56,25 +57,15 @@ abstract contract FallbackManager is SelfAuthorized, IFallbackManager {
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly
         assembly {
-            // When compiled with the optimizer, the compiler relies on certain assumptions on how the
-            // memory is used, therefore we need to guarantee memory safety (keeping the free memory pointer
-            // at memory offset 0x40 intact, not going beyond the scratch space, etc).
-            // See: <https://docs.soliditylang.org/en/latest/assembly.html#memory-safety>
-
             let handler := sload(FALLBACK_HANDLER_STORAGE_SLOT)
-
             if iszero(handler) {
                 return(0, 0)
             }
-
             let ptr := mload(0x40)
             calldatacopy(ptr, 0, calldatasize())
-
-            // The `msg.sender` address is shifted to the left by 12 bytes to remove the padding,
-            // then the address without padding is stored right after the calldata.
+            // 在 calldata 副本末尾追加 caller() 的 20 字节（左移 96 位去零填充），供 handler 识别原始调用方
             mstore(add(ptr, calldatasize()), shl(96, caller()))
-
-            // Add 20 bytes for the address that appended to the calldata.
+            // 有效 payload 长度 = 原 calldata 长度 + 20
             let success := call(gas(), handler, 0, ptr, add(calldatasize(), 20), 0, 0)
 
             returndatacopy(ptr, 0, returndatasize())

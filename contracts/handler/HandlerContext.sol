@@ -6,30 +6,18 @@ import {FALLBACK_HANDLER_STORAGE_SLOT} from "../libraries/SafeStorage.sol";
 
 /**
  * @title Handler Context
- * @notice Allows the fallback handler to extract additional context from the calldata.
- * @dev The fallback manager appends the following context to the calldata:
- *      1. Fallback manager caller address (non-padded)
- *      Based on <https://github.com/OpenZeppelin/openzeppelin-contracts/blob/f8cc8b844a9f92f63dc55aa581f7d643a1bc5ac1/contracts/metatx/ERC2771Context.sol>
+ * @notice 为 Fallback Handler 提供“原始调用方”等上下文：FallbackManager 会在转发给 handler 的 calldata 末尾追加 20 字节的 caller()，本合约提供 _msgSender() 读取。
+ * @dev _requireFallback() 通过读取 msg.sender（即 Safe）的 FALLBACK_HANDLER_STORAGE_SLOT 是否为本合约来尽力判断是否由 Safe 以 fallback 方式调用，仅为尽力而为，不可依赖为唯一安全边界。
  * @author Richard Meissner - @rmeissner
  */
 abstract contract HandlerContext {
-    /**
-     * @notice A modifier that reverts if not called by a Safe as a fallback handler.
-     * @dev Note that this modifier does a **best effort** attempt at not allowing calls that are
-     *      not as a fallback call, but it can still be tricked. It is suitable for use cases such as
-     *      making a best effort attempt to disallow ERC-721 and ERC-1155 token transfers to the
-     *      fallback handler contract.
-     */
+    /** 修饰符：要求当前调用来自 Safe 的 fallback（即 Safe 的 fallback handler 为本合约）。 */
     modifier onlyFallback() {
         _requireFallback();
         _;
     }
 
-    /**
-     * @dev Implementation of the {onlySafeFallback} modifier that checks whether the current call is a fallback call from a
-     *      Safe, and that the contract is not called directly. Note that this is only a **best
-     *      effort** check and may generate false positives under certain conditions.
-     */
+    /** 校验：msg.sender（Safe）的 fallback handler 配置为 address(this)。 */
     function _requireFallback() internal view {
         bytes memory storageData = ISafe(payable(msg.sender)).getStorageAt(uint256(FALLBACK_HANDLER_STORAGE_SLOT), 1);
         address fallbackHandler = abi.decode(storageData, (address));
@@ -37,12 +25,8 @@ abstract contract HandlerContext {
     }
 
     /**
-     * @notice Allows fetching the original caller address.
-     * @dev This is only reliable with a {FallbackManager} supporting this (e.g. Safe contract >=1.3.0).
-     *      When using this functionality, ensure that the linked _manager (aka msg.sender) supports this.
-     *      This function does not rely on a trusted forwarder. Use the returned value only to
-     *      check information against the calling manager.
-     * @return sender Original caller address.
+     * @notice 从 calldata 末尾 20 字节读取原始调用方（FallbackManager 追加的 caller()）。
+     * @return sender 发起对 Safe 调用的地址。
      */
     function _msgSender() internal pure returns (address sender) {
         require(msg.data.length >= 20, "Invalid calldata length");
@@ -55,10 +39,7 @@ abstract contract HandlerContext {
         /* solhint-enable no-inline-assembly */
     }
 
-    /**
-     * @notice Returns the FallbackManager address.
-     * @return Fallback manager address.
-     */
+    /** 返回“管理者”地址：在 fallback 调用中即为 Safe（msg.sender）。 */
     function _manager() internal view returns (address) {
         return msg.sender;
     }

@@ -3,20 +3,19 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title EIP-7951
- * @notice Base contract that adds support for calling the `p256verify` precompile.
- * @dev This was split into its own function to enable CVL summaries for better formal verification support. Note that
- *      this contract also works with RIP-7212 which has the exact same interface.
+ * @notice 调用链上 P256VERIFY 预编译（地址 0x100）验证 secp256r1 (P-256) 签名，用于 Safe 的 v=2 签名类型。
+ * @dev 与 RIP-7212 接口一致。独立为函数便于形式化验证与 CVL 摘要。
  * @author Nicholas Rodrigues Lordello - @nlordell
  */
 abstract contract EIP7951 {
     /**
-     * @notice Calls the EIP-7951 `P256VERIFY` precompile to verify a secp256r1 signature.
-     * @param h Message hash.
-     * @param r Signature r-component.
-     * @param s Signature s-component.
-     * @param qx Public key x-coordinate.
-     * @param qy Public key y-coordinate.
-     * @return result Whether or not the signature is valid.
+     * @notice 使用 EIP-7951 预编译验证 P-256 签名。
+     * @param h 消息哈希（32 字节）。
+     * @param r 签名 r 分量。
+     * @param s 签名 s 分量。
+     * @param qx 公钥 x 坐标。
+     * @param qy 公钥 y 坐标。
+     * @return result 签名是否有效；预编译返回 1 表示有效。
      */
     function p256Verify(bytes32 h, bytes32 r, bytes32 s, uint256 qx, uint256 qy) internal view returns (bool result) {
         // Call the EIP-7951/RIP-7212 precompile. We resort to assembly shenanigans here to avoid superfluous memory

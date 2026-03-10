@@ -56,17 +56,15 @@ abstract contract BaseModuleGuard is IModuleGuard {
 
 /**
  * @title Module Manager
- * @notice A contract managing Safe modules.
- * @dev Modules are extensions with unlimited access to a Safe that can be added to a Safe by its owners.
- *      ⚠️⚠️⚠️ WARNING: Modules are a security risk since they can execute arbitrary transactions,
- *      so only trusted and audited modules should be added to a Safe. A malicious module can
- *      completely take over a Safe. ⚠️⚠️⚠️
+ * @notice 管理 Safe 的模块：模块可由 owner 添加，并通过 execTransactionFromModule 以 Safe 身份执行任意调用。
+ * @dev 模块拥有与 Safe 等同的调用权限，仅应添加受信任且审计过的模块；恶意模块可完全控制 Safe。
+ *      支持可选的 Module Guard，在模块执行前后做检查。模块列表用链表存储，与 OwnerManager 类似。
  * @author Stefan George - @Georgi87
  * @author Richard Meissner - @rmeissner
  */
 abstract contract ModuleManager is SelfAuthorized, Executor, IModuleManager {
     /**
-     * @dev The sentinel module value in the {modules} linked list.
+     * @dev 模块链表哨兵：modules[SENTINEL_MODULES] 为第一个模块，末项指回 SENTINEL_MODULES。
      *      `SENTINEL_MODULES` is used to traverse {modules}, such that:
      *      1. `modules[SENTINEL_MODULES]` contains the first module
      *      2. `modules[last_module]` points back to `SENTINEL_MODULES`
@@ -80,29 +78,23 @@ abstract contract ModuleManager is SelfAuthorized, Executor, IModuleManager {
     mapping(address => address) internal modules;
 
     /**
-     * @notice Setup function sets the initial storage of the contract.
-     *         Optionally executes a delegate call to another contract to set up the modules.
-     * @param to Optional destination address of the call to execute.
-     * @param data Optional data of call to execute.
+     * @notice 初始化模块存储；可选地 delegatecall 到 to 执行 data 做进一步设置（如批量 enable 模块）。
+     * @param to 若非 0，则对 to 做 DelegateCall(data)，用于 setup 时一次性配置模块。
+     * @param data 传给 to 的 calldata。
      */
     function setupModules(address to, bytes memory data) internal {
-        if (modules[SENTINEL_MODULES] != address(0)) revertWithError("GS100");
+        if (modules[SENTINEL_MODULES] != address(0)) revertWithError("GS100"); // 已初始化
         modules[SENTINEL_MODULES] = SENTINEL_MODULES;
         if (to != address(0)) {
             if (!isContract(to)) revertWithError("GS002");
-            // Setup has to complete successfully or the transaction fails.
             if (!execute(to, 0, data, Enum.Operation.DelegateCall, type(uint256).max)) revertWithError("GS000");
         }
     }
 
     /**
-     * @notice Runs pre-execution checks for module transactions if a guard is enabled.
-     * @param to Target address of module transaction.
-     * @param value Native token value of module transaction.
-     * @param data Data payload of module transaction.
-     * @param operation Operation type (0 for `CALL`, 1 for `DELEGATECALL`) of the module transaction.
-     * @return guard Guard to be used for checking.
-     * @return guardHash Hash returned from the guard tx check.
+     * @notice 模块交易执行前：触发钩子、校验调用方为已启用模块、若设置了 Module Guard 则执行前置检查。
+     * @return guard 当前设置的 Module Guard 地址（可为 0）。
+     * @return guardHash Guard 返回的 moduleTxHash，供 postModuleExecution 使用。
      */
     function preModuleExecution(
         address to,
@@ -113,8 +105,7 @@ abstract contract ModuleManager is SelfAuthorized, Executor, IModuleManager {
         onBeforeExecTransactionFromModule(to, value, data, operation);
         guard = getModuleGuard();
 
-        // Only allow-listed modules are allowed.
-        if (msg.sender == SENTINEL_MODULES || modules[msg.sender] == address(0)) revertWithError("GS104");
+        if (msg.sender == SENTINEL_MODULES || modules[msg.sender] == address(0)) revertWithError("GS104"); // 仅已启用模块可调
 
         if (guard != address(0)) {
             guardHash = IModuleGuard(guard).checkModuleTransaction(to, value, data, operation, msg.sender);

@@ -67,12 +67,14 @@ abstract contract BaseTransactionGuard is ITransactionGuard {
 
 /**
  * @title Guard Manager
- * @notice A contract managing transaction guards which perform pre- and post-checks on Safe transactions.
+ * @notice 管理 Transaction Guard：在 execTransaction 执行前后调用 Guard 的 checkTransaction / checkAfterExecution。
+ * @dev Guard 存于固定 slot GUARD_STORAGE_SLOT；若设为 0 则不做检查。无公开 getter 以节省字节码，可通过 StorageAccessible.getStorageAt(GUARD_STORAGE_SLOT, 1) 查询。
  * @author Richard Meissner - @rmeissner
  */
 abstract contract GuardManager is SelfAuthorized, IGuardManager {
     /**
      * @inheritdoc IGuardManager
+     * @dev 非零 guard 必须实现 ITransactionGuard 接口（supportInterface）。
      */
     function setGuard(address guard) external override authorized {
         if (guard != address(0) && !ITransactionGuard(guard).supportsInterface(type(ITransactionGuard).interfaceId))
@@ -87,13 +89,7 @@ abstract contract GuardManager is SelfAuthorized, IGuardManager {
         emit ChangedGuard(guard);
     }
 
-    /**
-     * @notice Internal method to retrieve the current guard.
-     * @dev We do not have a public method because we're short on bytecode size limit,
-     *      to retrieve the guard address, one can use {getStorageAt} from {StorageAccessible} contract
-     *      with the slot {GUARD_STORAGE_SLOT}.
-     * @return guard The address of the guard.
-     */
+    /** 内部读取当前 Guard 地址；对外可用 getStorageAt(GUARD_STORAGE_SLOT, 1) 获取 */
     function getGuard() internal view returns (address guard) {
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly

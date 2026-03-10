@@ -5,41 +5,33 @@ import {Executor, Enum} from "../base/Executor.sol";
 
 /**
  * @title Simulate Transaction Accessor
- * @notice Can be used with {StorageAccessible} to simulate Safe transactions.
+ * @notice 供 Safe 通过 StorageAccessible.simulateAndRevert 使用的模拟执行器：对 (to, value, data, operation) 执行一次调用并返回 gas 消耗、成功与否及 returnData。
+ * @dev 必须通过 DELEGATECALL 调用（即 Safe 的 storage 与上下文），否则 onlyDelegateCall 会 revert。返回值格式等价于 abi.encode(estimate, success, returnData)。
  * @author Richard Meissner - @rmeissner
  */
 contract SimulateTxAccessor is Executor {
-    /**
-     * @dev The address of the {SimulateTxAccessor} contract.
-     */
+    // 单例地址，用于校验调用方式：address(this) != ACCESSOR_SINGLETON 表示在 Safe 上下文中
     address private immutable ACCESSOR_SINGLETON;
 
     constructor() {
         ACCESSOR_SINGLETON = address(this);
     }
 
-    /**
-     * @notice Modifier to make a function callable via `DELEGATECALL` only.
-     *         If the function is called via a regular call, it will revert.
-     */
+    /** 仅允许通过 DELEGATECALL 调用（由 Safe 调用）。 */
     modifier onlyDelegateCall() {
         require(address(this) != ACCESSOR_SINGLETON, "SimulateTxAccessor should only be called via delegatecall");
         _;
     }
 
     /**
-     * @notice Simulates a Safe transaction and returns the used gas, success boolean, and the return data.
-     * @dev Executes the specified operation and returns the data from the call.
-     *      This function must be called via `DELEGATECALL`.
-     *      This returns the data equal to `abi.encode(uint256(estimate), bool(success), bytes(returnData))`.
-     *      Specifically, the return data will be: `estimate:uint256 || success:bool || returnData.length:uint256 || returnData:bytes`.
-     * @param to Destination address.
-     * @param value Native token value.
-     * @param data Data payload.
-     * @param operation Operation type (0 for `CALL`, 1 for `DELEGATECALL`).
-     * @return estimate Gas used.
-     * @return success Success boolean value.
-     * @return returnData Return data.
+     * @notice 模拟执行一笔调用，返回消耗的 gas、是否成功及返回数据。
+     * @param to 目标地址。
+     * @param value 发送的 wei。
+     * @param data 调用数据。
+     * @param operation Call 或 DelegateCall。
+     * @return estimate 本次调用消耗的 gas。
+     * @return success 调用是否成功。
+     * @return returnData 调用返回的字节数据。
      */
     function simulate(
         address to,

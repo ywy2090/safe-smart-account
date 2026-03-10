@@ -4,6 +4,7 @@ pragma solidity >=0.7.0 <0.9.0;
 import {ISafe, IStaticFallbackMethod, IFallbackMethod, ExtensibleBase} from "./ExtensibleBase.sol";
 
 interface IFallbackHandler {
+    // 由 Safe 自调用，用于配置 selector -> method(编码后)。
     function setSafeMethod(bytes4 selector, bytes32 newMethod) external;
 }
 
@@ -22,6 +23,7 @@ abstract contract FallbackHandler is ExtensibleBase, IFallbackHandler {
      * @param newMethod A contract that implements the `IFallbackMethod` or `IStaticFallbackMethod` interface
      */
     function setSafeMethod(bytes4 selector, bytes32 newMethod) public override onlySelf {
+        // 以 Safe 为命名空间存储路由，互不干扰。
         _setSafeMethod(ISafe(payable(_msgSender())), selector, newMethod);
     }
 
@@ -29,13 +31,17 @@ abstract contract FallbackHandler is ExtensibleBase, IFallbackHandler {
 
     // solhint-disable-next-line
     fallback(bytes calldata) external returns (bytes memory result) {
+        // Safe fallback 会在 calldata 末尾追加原始调用者地址（20 bytes）。
+        // 因此长度至少应为 selector(4) + sender(20)。
         require(msg.data.length >= 24, "invalid method selector");
         (ISafe safe, address sender, bool isStatic, address handler) = _getContextAndHandler();
         require(handler != address(0), "method handler not set");
 
         if (isStatic) {
+            // 调用静态处理器，剥离尾部附加的 sender 字段后再转发。
             result = IStaticFallbackMethod(handler).handle(safe, sender, 0, msg.data[:msg.data.length - 20]);
         } else {
+            // 调用可修改状态的处理器。
             result = IFallbackMethod(handler).handle(safe, sender, 0, msg.data[:msg.data.length - 20]);
         }
     }

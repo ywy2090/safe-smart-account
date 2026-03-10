@@ -3,14 +3,14 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Enum
- * @notice Collection of enums used in Safe Smart Account contracts.
+ * @notice Safe 智能账户使用的枚举集合。
  * @author @safe-global/safe-protocol
  */
 library Enum {
     /**
-     * @notice A Safe transaction operation.
-     * @custom:variant Call The Safe transaction is executed with the `CALL` opcode.
-     * @custom:variant Delegatecall The Safe transaction is executed with the `DELEGATECALL` opcode.
+     * @notice 交易执行方式：Call(0) 使用 CALL 向目标转 value 并执行；DelegateCall(1) 使用 DELEGATECALL 在 Safe 上下文中执行目标代码。
+     * @custom:variant Call 使用 CALL 操作码执行。
+     * @custom:variant Delegatecall 使用 DELEGATECALL 操作码执行。
      */
     enum Operation {
         Call,

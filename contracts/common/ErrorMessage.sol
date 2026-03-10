@@ -4,18 +4,14 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Error Message
- * @notice Revert with Safe error codes.
- * @dev This contract specializes in reverting for the Safe 5-byte error codes (`GS***`).
- *      This is conceptually very similar to error codes introduced in Solidity version 0.8.
- *      The implementation using assembly saves a lot of gas and code size.
+ * @notice 使用固定的 5 字节错误码（如 GS001）进行 revert，便于前端与索引解析。
+ * @dev 仅支持恰好 5 字节的错误串；用 assembly 构造 Error(string) 的 revert 数据，比直接 revert(string) 更省 gas 与字节码。
  * @author Shebin John - @remedcu
  */
 abstract contract ErrorMessage {
     /**
-     * @notice Revert with a Safe 5-byte error code `GS***`.
-     * @dev This function behaves in the same way as the built-in Solidity `revert("GS***")` but
-     *      it only works for revert messages that are exactly 5 bytes long.
-     * @param error The error string to revert with.
+     * @notice 以 Safe 5 字节错误码 revert（如 "GS001"）。
+     * @param error 5 字节错误标识，通常为 "GS" + 三位数字。
      */
     function revertWithError(bytes5 error) internal pure {
         /* solhint-disable no-inline-assembly */

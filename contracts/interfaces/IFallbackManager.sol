@@ -3,7 +3,7 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Fallback Manager Interface
- * @notice Interface for managing fallback calls made to this contract.
+ * @notice 管理对 Safe 的 fallback 调用：将无匹配函数且带 data 的调用转发到已设置的 handler，并在 calldata 末尾附加 caller 地址。
  * @author @safe-global/safe-protocol
  */
 interface IFallbackManager {

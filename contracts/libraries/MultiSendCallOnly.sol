@@ -3,19 +3,14 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Multi Send Call Only
- * @notice Batch multiple transactions into one, but only `CALL`s.
- * @dev The guard logic is not required here as this contract doesn't support nested `DELEGATECALL`s.
+ * @notice 仅支持 CALL 的批量执行；与 MultiSend 编码格式兼容，但 operation=1（DELEGATECALL）时会 revert，避免嵌套 DELEGATECALL 风险。
  * @author Stefan George - @Georgi87
  * @author Richard Meissner - @rmeissner
  */
 contract MultiSendCallOnly {
     /**
-     * @notice Sends multiple transactions and reverts all if one fails.
-     * @dev The code is for the most part the same as the normal {MultiSend} in order to keep compatibility,
-     *      but reverts if a transaction tries to perform a `DELEGATECALL` operation.
-     *      This method is payable as `DELEGATECALL`s keep the `msg.value` from the previous call.
-     *      Otherwise, calling this method from {execTransaction} that receives native token would revert.
-     * @param transactions Encoded transactions. Each transaction is encoded as a packed bytes of:
+     * @notice 顺序执行多笔 CALL 交易，任一笔失败或出现 DELEGATECALL 则 revert。
+     * @param transactions 与 MultiSend 相同的打包格式，但每笔 operation 必须为 0（CALL）：
      *                     1. _operation_ as a `uint8(0)` for `CALL` (=> 1 byte),
      *                     2. _to_ as a {address} (=> 20 bytes),
      *                     3. _value_ as a {uint256} (=> 32 bytes),

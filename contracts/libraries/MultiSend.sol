@@ -3,16 +3,12 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Multi Send
- * @notice Batch multiple transactions into one.
- * @author Nick Dodson - <nick.dodson@consensys.net>
- * @author Gonçalo Sá - <goncalo.sa@consensys.net>
- * @author Stefan George - @Georgi87
- * @author Richard Meissner - @rmeissner
+ * @notice 将多笔交易打包为一次调用；通常由 Safe 通过 DELEGATECALL 调用，在 Safe 上下文中顺序执行每笔子交易。
+ * @dev 每笔子交易格式：operation(1) || to(20) || value(32) || dataLength(32) || data。operation 0=CALL，1=DELEGATECALL。任一失败则整体 revert。
+ * @author Nick Dodson, Gonçalo Sá, Stefan George, Richard Meissner
  */
 contract MultiSend {
-    /**
-     * @dev The address of the {MultiSend} contract.
-     */
+    // 单例地址，用于校验必须通过 DELEGATECALL 调用（address(this) != MULTISEND_SINGLETON 时说明在 proxy 中）
     address private immutable MULTISEND_SINGLETON;
 
     constructor() {
@@ -20,10 +16,8 @@ contract MultiSend {
     }
 
     /**
-     * @notice Sends multiple transactions and reverts all if one fails.
-     * @dev This method is payable as `DELEGATECALL`s keep the `msg.value` from the previous call.
-     *      Otherwise, calling this method from {execTransaction} that receives native token would revert.
-     * @param transactions Encoded transactions. Each transaction is encoded as a packed bytes of:
+     * @notice 顺序执行多笔交易，任一笔失败则 revert。
+     * @param transactions 打包编码的多笔交易，每笔格式为：
      *                     1. _operation_ as a {uint8}, 0 for a `CALL` or 1 for a `DELEGATECALL` (=> 1 byte),
      *                     2. _to_ as an {address} (=> 20 bytes),
      *                     3. _value_ as a {uint256} (=> 32 bytes),

@@ -6,10 +6,12 @@ import {HandlerContext} from "../HandlerContext.sol";
 import {MarshalLib} from "./MarshalLib.sol";
 
 interface IFallbackMethod {
+    // 非 static fallback 方法：允许状态修改。
     function handle(ISafe safe, address sender, uint256 value, bytes calldata data) external returns (bytes memory result);
 }
 
 interface IStaticFallbackMethod {
+    // static fallback 方法：只读，不允许状态修改。
     function handle(ISafe safe, address sender, uint256 value, bytes calldata data) external view returns (bytes memory result);
 }
 
@@ -24,18 +26,16 @@ abstract contract ExtensibleBase is HandlerContext {
 
     // --- storage ---
 
-    // A mapping of Safe => selector => method
-    // The method is a bytes32 that is encoded as follows:
-    // - The first byte is 0x00 if the method is static and 0x01 if the method is not static
-    // - The last 20 bytes are the address of the handler contract
-    // The method is encoded / decoded using the MarshalLib
+    // Safe 级别的方法路由表：Safe => selector => packed method。
+    // packed method 的编码规则：
+    // - 最高字节：0x00 表示 static(view)，0x01 表示非 static。
+    // - 低 20 字节：具体处理器地址。
+    // 编解码由 MarshalLib 负责。
     mapping(ISafe => mapping(bytes4 => bytes32)) public safeMethods;
 
     // --- modifiers ---
     modifier onlySelf() {
-        // Use the `HandlerContext._msgSender()` to get the caller of the fallback function
-        // Use the `HandlerContext._manager()` to get the manager, which should be the Safe
-        // Require that the caller is the Safe itself
+        // 仅允许 Safe 自身通过 fallback 上下文调用配置接口，避免外部地址直接改路由。
         require(_msgSender() == _manager(), "only safe can call this method");
         _;
     }
@@ -48,10 +48,7 @@ abstract contract ExtensibleBase is HandlerContext {
 
         (, address newHandler) = MarshalLib.decode(newMethod);
         if (address(newHandler) == address(0)) {
-            // Note that we treat methods with handlers set to the 0 address the same. That
-            // is, the `isStatic` flag of the method is ignored. This is because having a
-            // handler address of 0 indicates that the method is disabled (regardless of
-            // the other flags).
+            // handler == 0 视为“禁用方法”，此时忽略 isStatic 标记，统一归零存储。
             newMethod = bytes32(0);
         }
 
@@ -65,6 +62,7 @@ abstract contract ExtensibleBase is HandlerContext {
      * @return sender The original `msg.sender` (as received by the FallbackManager)
      */
     function _getContext() internal view returns (ISafe safe, address sender) {
+        // _manager() 是触发 fallback 的 Safe；_msgSender() 是原始外部调用者。
         safe = ISafe(payable(_manager()));
         sender = _msgSender();
     }
@@ -78,6 +76,7 @@ abstract contract ExtensibleBase is HandlerContext {
      */
     function _getContextAndHandler() internal view returns (ISafe safe, address sender, bool isStatic, address handler) {
         (safe, sender) = _getContext();
+        // msg.sig 是当前 fallback 调用的 selector，用于按 Safe+selector 查路由。
         (isStatic, handler) = MarshalLib.decode(safeMethods[safe][msg.sig]);
     }
 }

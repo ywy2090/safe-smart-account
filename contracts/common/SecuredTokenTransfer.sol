@@ -3,21 +3,20 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Secured Token Transfer
- * @notice Securely transfer tokens, handling non-standard ERC-20 tokens.
+ * @notice 安全执行 ERC20 transfer：兼容无返回值或 bool 返回值的代币，失败时返回 false 而不 revert。
  * @author Richard Meissner - @rmeissner
  */
 abstract contract SecuredTokenTransfer {
     /**
-     * @notice Transfers a token and returns `true` if it was successful, `false` otherwise.
-     * @dev It checks the return data of the transfer call and returns true if the transfer was successful.
-     *      It doesn't check if the `token` address is a contract or not.
-     * @param token Token that should be transferred.
-     * @param receiver Receiver to whom the token should be transferred.
-     * @param amount The amount of tokens that should be transferred.
-     * @return transferred Boolean indicating whether or not the transfer was successful.
+     * @notice 向 receiver 转 amount 数量的 token；成功返回 true，失败返回 false。
+     * @dev 不校验 token 是否为合约。对 return data 长度做判断：0 字节视为 success 即成功，32 字节且为 true 即成功，否则失败。
+     * @param token ERC20 代币地址。
+     * @param receiver 接收地址。
+     * @param amount 数量。
+     * @return transferred 是否转账成功。
      */
     function transferToken(address token, address receiver, uint256 amount) internal returns (bool transferred) {
-        // The transfer function selector `0xa9059cbb`, precomputed value of `bytes4(keccak256("transfer(address,uint256)"))`.
+        // transfer(address,uint256) 的 selector
         bytes memory data = abi.encodeWithSelector(0xa9059cbb, receiver, amount);
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly

@@ -5,13 +5,11 @@ import {INativeCurrencyPaymentFallback} from "./../interfaces/INativeCurrencyPay
 
 /**
  * @title Native Currency Payment Fallback
- * @notice A contract that has a fallback to accept native token payments.
+ * @notice 允许 Safe 直接接收原生币（ETH）：对合约的纯 value 转账会触发 receive 并发出 SafeReceived 事件。
  * @author Richard Meissner - @rmeissner
  */
 abstract contract NativeCurrencyPaymentFallback is INativeCurrencyPaymentFallback {
-    /**
-     * @inheritdoc INativeCurrencyPaymentFallback
-     */
+    /** 接收原生币时发出 SafeReceived(sender, value) */
     receive() external payable override {
         emit SafeReceived(msg.sender, msg.value);
     }

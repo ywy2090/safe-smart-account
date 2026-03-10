@@ -5,17 +5,13 @@ import {IStorageAccessible} from "../interfaces/IStorageAccessible.sol";
 
 /**
  * @title Storage Accessible
- * @notice A generic base contract that allows callers to access all internal storage.
- * @dev See <https://github.com/gnosis/util-contracts/blob/bb5fe5fb5df6d8400998094fb1b32a178a47c3a1/contracts/StorageAccessible.sol>
- *      It removes a method from the original contract not needed for the Safe Smart Account contracts.
+ * @notice 允许按 slot 偏移读取合约 storage，并支持 simulateAndRevert 模拟调用并携带结果 revert。
+ * @dev 用于读取 Guard 等存储或安全地试执行；见 Gnosis util-contracts StorageAccessible。
  * @author Gnosis Developers
  */
 abstract contract StorageAccessible is IStorageAccessible {
-    /**
-     * @inheritdoc IStorageAccessible
-     */
+    /** 读取从 offset 起的 length 个 storage 槽，每槽 32 字节 */
     function getStorageAt(uint256 offset, uint256 length) public view override returns (bytes memory) {
-        // We use `<< 5` instead of the equivalent `* 32` as `SHL` opcode only uses 3 gas, while the `MUL` opcode uses 5 gas.
         bytes memory result = new bytes(length << 5);
         for (uint256 index = 0; index < length; ++index) {
             /* solhint-disable no-inline-assembly */
@@ -31,13 +27,13 @@ abstract contract StorageAccessible is IStorageAccessible {
 
     /**
      * @inheritdoc IStorageAccessible
+     * @dev 使用当前合约上下文 delegatecall targetContract(calldataPayload)，然后将 success、returndatasize、returnData 编码进 revert 数据并 revert，便于调用方 try/catch 解析结果。
      */
     function simulateAndRevert(address targetContract, bytes memory calldataPayload) external override {
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly
         assembly {
             let success := delegatecall(gas(), targetContract, add(calldataPayload, 0x20), mload(calldataPayload), 0, 0)
-            // Load free memory location.
             let ptr := mload(0x40)
             mstore(ptr, success)
             mstore(add(ptr, 0x20), returndatasize())

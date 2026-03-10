@@ -4,22 +4,19 @@ pragma solidity >=0.7.0 <0.9.0;
 
 /**
  * @title Create Call
- * @notice Allows Safes to use `CREATE*` opcodes and deploy contracts.
+ * @notice 供 Safe 通过 DELEGATECALL 使用的合约创建封装：支持 CREATE 与 CREATE2，部署的合约由 Safe 作为部署者。
  * @author Richard Meissner - @rmeissner
  */
 contract CreateCall {
-    /**
-     * @notice Emitted when a new contract is created.
-     * @param newContract The address of the created contract.
-     */
+    /** 每次成功创建合约时发出 */
     event ContractCreation(address indexed newContract);
 
     /**
-     * @notice Deploys a new contract using the create2 opcode.
-     * @param value The value in wei to be sent with the contract creation.
-     * @param deploymentData The initialisation code of the contract to be created.
-     * @param salt The salt value to use for the contract creation.
-     * @return newContract The address of the newly created contract.
+     * @notice 使用 CREATE2 部署合约；地址由 salt + creationCode 确定，可预测。
+     * @param value 随创建发送的 wei。
+     * @param deploymentData 创建字节码（含 constructor 参数）。
+     * @param salt CREATE2 盐值。
+     * @return newContract 新合约地址。
      */
     function performCreate2(uint256 value, bytes memory deploymentData, bytes32 salt) public returns (address newContract) {
         /* solhint-disable no-inline-assembly */
@@ -33,10 +30,10 @@ contract CreateCall {
     }
 
     /**
-     * @notice Deploys a new contract using the create opcode.
-     * @param value The value in wei to be sent with the contract creation.
-     * @param deploymentData The initialisation code of the contract to be created.
-     * @return newContract The address of the newly created contract.
+     * @notice 使用 CREATE 部署合约；地址由 sender + nonce 决定。
+     * @param value 随创建发送的 wei。
+     * @param deploymentData 创建字节码。
+     * @return newContract 新合约地址。
      */
     function performCreate(uint256 value, bytes memory deploymentData) public returns (address newContract) {
         /* solhint-disable no-inline-assembly */

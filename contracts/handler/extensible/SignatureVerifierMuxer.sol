@@ -5,6 +5,7 @@ pragma solidity >=0.7.0 <0.9.0;
 import {ISafe, ExtensibleBase} from "./ExtensibleBase.sol";
 
 interface ERC1271 {
+    // ERC-1271 标准入口。
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4 magicValue);
 }
 
@@ -39,8 +40,10 @@ interface ISafeSignatureVerifier {
 }
 
 interface ISignatureVerifierMuxer {
+    // 查询某 Safe 在指定 domainSeparator 下绑定的 verifier。
     function domainVerifiers(ISafe safe, bytes32 domainSeparator) external view returns (ISafeSignatureVerifier);
 
+    // 由 Safe 自调用，设置 domain -> verifier。
     function setDomainVerifier(bytes32 domainSeparator, ISafeSignatureVerifier verifier) external;
 }
 
@@ -55,9 +58,9 @@ interface ISignatureVerifierMuxer {
  */
 abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureVerifierMuxer {
     // --- constants ---
-    // keccak256("SafeMessage(bytes message)");
+    // keccak256("SafeMessage(bytes message)")
     bytes32 private constant SAFE_MSG_TYPEHASH = 0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca;
-    // keccak256("safeSignature(bytes32,bytes32,bytes,bytes)");
+    // 扩展签名前缀选择器：keccak256("safeSignature(bytes32,bytes32,bytes,bytes)")
     bytes4 private constant SAFE_SIGNATURE_MAGIC_VALUE = 0x5fd7e97d;
 
     // --- storage ---
@@ -77,6 +80,7 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
      * @param newVerifier A contract that implements `ISafeSignatureVerifier`
      */
     function setDomainVerifier(bytes32 domainSeparator, ISafeSignatureVerifier newVerifier) public override onlySelf {
+        // 以 Safe 为作用域进行配置，确保不同 Safe 互不影响。
         ISafe safe = ISafe(payable(_msgSender()));
         ISafeSignatureVerifier oldVerifier = domainVerifiers[safe][domainSeparator];
         domainVerifiers[safe][domainSeparator] = newVerifier;
@@ -93,7 +97,7 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
     function isValidSignature(bytes32 _hash, bytes calldata signature) external view override returns (bytes4 magic) {
         (ISafe safe, address sender) = _getContext();
 
-        // Check if the signature is for an `ISafeSignatureVerifier` and if it is valid for the domain.
+        // 先尝试走“域路由 verifier”分支；失败再回退到 Safe 默认签名校验逻辑。
         if (signature.length >= 4) {
             bytes4 sigSelector;
             /* solhint-disable no-inline-assembly */
@@ -103,10 +107,9 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
             }
             /* solhint-enable no-inline-assembly */
 
-            // Guard against short signatures that would cause abi.decode to revert.
+            // 防止长度不足导致 abi.decode revert。
             if (sigSelector == SAFE_SIGNATURE_MAGIC_VALUE && signature.length >= 68) {
-                // Signature is for an `ISafeSignatureVerifier` - decode the signature.
-                // Layout of the `signature`:
+                // 命中 muxer 自定义签名格式，布局如下：
                 // 0x00 to 0x04: selector
                 // 0x04 to 0x24: domainSeparator
                 // 0x24 to 0x44: typeHash
@@ -117,24 +120,23 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
                 // payload.offset to payload.offset+0x20: payload.length
                 // payload.offset+0x20 to payload.offset+0x20+payload.length: payload
                 //
-                // Get the domainSeparator from the signature.
+                // 先读 domainSeparator/typeHash，再查 Safe 对该域授权的 verifier。
                 (bytes32 domainSeparator, bytes32 typeHash) = abi.decode(signature[4:68], (bytes32, bytes32));
 
                 ISafeSignatureVerifier verifier = domainVerifiers[safe][domainSeparator];
-                // Check if there is an `ISafeSignatureVerifier` for the domain.
+                // verifier 存在时，校验 _hash 与传入 EIP-712 三元组是否一致，防止签名数据错配。
                 if (address(verifier) != address(0)) {
                     (, , bytes memory encodeData, bytes memory payload) = abi.decode(signature[4:], (bytes32, bytes32, bytes, bytes));
 
-                    // Check that the signature is valid for the domain.
                     if (keccak256(EIP712.encodeMessageData(domainSeparator, typeHash, encodeData)) == _hash) {
-                        // Preserving the context, call the Safe's authorized `ISafeSignatureVerifier` to verify.
+                        // 保留 Safe + 原始 sender 上下文，委托给授权 verifier 最终判定。
                         return verifier.isValidSafeSignature(safe, sender, _hash, domainSeparator, typeHash, encodeData, payload);
                     }
                 }
             }
         }
 
-        // domainVerifier doesn't exist or the signature is invalid for the domain - fall back to the default
+        // 未配置域 verifier，或扩展签名不合法：回退到 Safe 默认实现（approved hash / threshold sig）。
         return defaultIsValidSignature(safe, _hash, signature);
     }
 
@@ -145,6 +147,7 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
      * @param signature The signature to be verified
      */
     function defaultIsValidSignature(ISafe safe, bytes32 _hash, bytes memory signature) internal view returns (bytes4 magic) {
+        // 与 Safe 合约内部逻辑保持一致：先构造 SafeMessage 哈希再校验。
         bytes memory messageData = EIP712.encodeMessageData(
             safe.domainSeparator(),
             SAFE_MSG_TYPEHASH,
@@ -152,10 +155,10 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
         );
         bytes32 messageHash = keccak256(messageData);
         if (signature.length == 0) {
-            // approved hashes
+            // 空签名路径：依赖链上预批准哈希。
             require(safe.signedMessages(messageHash) != 0, "Hash not approved");
         } else {
-            // threshold signatures
+            // 非空签名路径：按阈值签名规则校验。
             safe.checkSignatures(address(0), messageHash, signature);
         }
         magic = ERC1271.isValidSignature.selector;
@@ -164,6 +167,7 @@ abstract contract SignatureVerifierMuxer is ExtensibleBase, ERC1271, ISignatureV
 
 library EIP712 {
     function encodeMessageData(bytes32 domainSeparator, bytes32 typeHash, bytes memory message) internal pure returns (bytes memory) {
+        // EIP-712 digest preimage: 0x1901 || domainSeparator || keccak256(typeHash || message)
         return abi.encodePacked(bytes1(0x19), bytes1(0x01), domainSeparator, keccak256(abi.encodePacked(typeHash, message)));
     }
 }

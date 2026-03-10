@@ -17,7 +17,7 @@ abstract contract TokenCallbacks is ExtensibleBase, ERC1155TokenReceiver, ERC721
      * return Standardized onERC1155Received return value.
      */
     function onERC1155Received(address, address, uint256, uint256, bytes calldata) external view override onlyFallback returns (bytes4) {
-        // Else return the standard value
+        // 只允许经 Safe fallback 上下文调用，返回 ERC-1155 单笔接收魔术值。
         return 0xf23a6e61;
     }
 
@@ -32,7 +32,7 @@ abstract contract TokenCallbacks is ExtensibleBase, ERC1155TokenReceiver, ERC721
         uint256[] calldata,
         bytes calldata
     ) external view override onlyFallback returns (bytes4) {
-        // Else return the standard value
+        // 返回 ERC-1155 批量接收魔术值。
         return 0xbc197c81;
     }
 
@@ -41,7 +41,7 @@ abstract contract TokenCallbacks is ExtensibleBase, ERC1155TokenReceiver, ERC721
      *  return Standardized onERC721Received return value.
      */
     function onERC721Received(address, address, uint256, bytes calldata) external view override onlyFallback returns (bytes4) {
-        // Else return the standard value
+        // 返回 ERC-721 接收魔术值。
         return 0x150b7a02;
     }
 }

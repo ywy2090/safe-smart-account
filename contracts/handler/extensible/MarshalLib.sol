@@ -2,6 +2,9 @@
 pragma solidity >=0.7.0 <0.9.0;
 
 library MarshalLib {
+    // 打包格式（bytes32）：
+    // [1 byte flags][4 bytes selector(可选)][7 bytes reserved][20 bytes handler address]
+    // 其中 flags 的最低语义是：0x00=static(view), 0x01=non-static。
     /**
      * Encode a method handler into a `bytes32` value
      * @dev The first byte of the `bytes32` value is set to 0x01 if the method is not static (`view`)
@@ -10,6 +13,7 @@ library MarshalLib {
      * @param handler The address of the handler contract implementing the `IFallbackMethod` or `IStaticFallbackMethod` interface
      */
     function encode(bool isStatic, address handler) internal pure returns (bytes32 data) {
+        // 仅编码 flags + handler 地址。
         data = bytes32(uint256(uint160(handler)) | (isStatic ? 0 : (1 << 248)));
     }
 
@@ -23,6 +27,7 @@ library MarshalLib {
      * @param handler The address of the handler contract implementing the `IFallbackMethod` or `IStaticFallbackMethod` interface
      */
     function encodeWithSelector(bool isStatic, bytes4 selector, address handler) internal pure returns (bytes32 data) {
+        // 在 encode 基础上额外把 selector 放到高位区间，便于批量导入接口映射。
         data = bytes32(uint256(uint160(handler)) | (isStatic ? 0 : (1 << 248)) | (uint256(uint32(selector)) << 216));
     }
 
@@ -36,8 +41,9 @@ library MarshalLib {
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly
         assembly {
-            // set isStatic to true if the left-most byte of the data is 0x00
+            // 左侧最高字节为 0 表示 static；非 0 表示 non-static。
             isStatic := iszero(shr(248, data))
+            // 低 20 字节为处理器地址。
             handler := and(data, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
         }
         /* solhint-enable no-inline-assembly */
@@ -54,9 +60,11 @@ library MarshalLib {
         /* solhint-disable no-inline-assembly */
         /// @solidity memory-safe-assembly
         assembly {
-            // set isStatic to true if the left-most byte of the data is 0x00
+            // 左侧最高字节为 0 表示 static；非 0 表示 non-static。
             isStatic := iszero(shr(248, data))
+            // 低 20 字节为处理器地址。
             handler := and(data, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+            // 取中间 4 字节 selector。
             selector := shl(168, shr(160, data))
         }
         /* solhint-enable no-inline-assembly */

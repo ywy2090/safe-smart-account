@@ -5,7 +5,8 @@ import {SafeProxy} from "./SafeProxy.sol";
 
 /**
  * @title Safe Proxy Factory
- * @notice Atomically create and initialize Safe smart accounts.
+ * @notice 使用 CREATE2 部署 SafeProxy 并可选择性在创建后执行 initializer 调用，从而原子化完成“创建 + 初始化” Safe。
+ * @dev 可通过 proxyCreationCode() / proxyCreationCodehash(singleton) 预计算 proxy 地址；salt 通常由 keccak256(initializer)+saltNonce（及可选 chainId）生成。
  * @author Stefan George - @Georgi87
  */
 contract SafeProxyFactory {
@@ -45,11 +46,11 @@ contract SafeProxyFactory {
     }
 
     /**
-     * @notice Internal method to create a new proxy contract using `CREATE2`. Optionally executes an initializer call to a new proxy.
-     * @param _singleton Address of singleton contract. Must be deployed at the time of execution.
-     * @param initializer Optional payload for a message call to be sent to a new proxy contract.
-     * @param salt `CREATE2` salt to use for calculating the address of the new proxy contract.
-     * @return proxy Address of the new proxy contract.
+     * @notice 使用 CREATE2 部署 Proxy，可选随后对 proxy 做一次 call(initializer)。
+     * @param _singleton 实现合约地址，部署时必须已存在。
+     * @param initializer 若长度>0，部署后对 proxy 执行 call(initializer)（通常为 setup(...) 的 calldata），失败则整体 revert。
+     * @param salt CREATE2 盐值。
+     * @return proxy 新 Proxy 实例。
      */
     function deployProxy(address _singleton, bytes memory initializer, bytes32 salt) internal returns (SafeProxy proxy) {
         require(isContract(_singleton), "Singleton contract not deployed");
