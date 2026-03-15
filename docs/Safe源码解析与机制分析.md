@@ -16,7 +16,7 @@
 - [4. 关键机制](#4-关键机制)
   - [4.1 交易哈希与 EIP-712](#41-交易哈希与-eip-712)
   - [4.2 签名验证系统](#42-签名验证系统)
-  - [4.3 Gas 估算与退款](#43-gas-估算与退款)
+  - [4.3 Gas 与费用机制](#43-gas-与费用机制)
   - [4.4 Fallback 体系](#44-fallback-体系)
 - [5. 扩展系统：Module 与 Guard](#5-扩展系统module-与-guard)
   - [5.1 模块执行](#51-模块执行)
@@ -302,10 +302,27 @@ classDiagram
 
 `SafeProxyFactory.createProxyWithNonce(_singleton, initializer, saltNonce)` 的关键点不只在于 `CREATE2`，还在于“地址如何与初始化参数绑定”以及“为什么可以把创建和初始化放进同一笔交易”：
 
-- 工厂先计算 `salt = keccak256(keccak256(initializer), saltNonce)`；因此 **initializer 变化会导致 proxy 地址变化**。
+- 工厂先计算 `salt = keccak256(keccak256(initializer), saltNonce)`；因此 **initializer 变化会导致 proxy 地址变化**。这使得在多条链上，只要使用相同的 `singleton`、相同的 `initializer` 和相同的 `saltNonce`，就能部署出**地址完全一致**的 Safe 钱包。
 - `deployProxy` 使用 `type(SafeProxy).creationCode + singleton` 作为部署字节码，通过 `create2` 生成新 proxy。
 - 若 `initializer.length > 0`，工厂会立即对新 proxy 执行一次 `call(initializer)`；在大多数场景下，这个 `initializer` 就是 `Safe.setup(...)` 的 calldata。
 - 若初始化调用失败，工厂会把 revert data 原样向上抛出。因此整个“创建 + 初始化”是原子操作，不会留下“已经部署但尚未正确 setup”的半成品。
+
+#### `Safe.setup` 与 `initializer` 参数剖析
+
+因为 Proxy 本身没有业务逻辑，它必须在部署后通过 `delegatecall` 借用 `Safe` 的 `setup` 函数来完成状态的初始化（类似 constructor 的作用，但限定只能执行一次）。
+
+`initializer` 这串参数是由**链下客户端（前端网页、官方 App、或 SDK）**根据用户的配置意图打包而成的 ABI 编码字节码，包含了以下核心内容：
+
+| 参数名 | 含义 | 用途与设置方 |
+|---|---|---|
+| `_owners` | 多签所有者列表 | 由前端用户指定，用于初始化 `owners` 单向链表。 |
+| `_threshold` | 多签阈值 | 由前端用户指定，例如“3 个 owners 需要 2 个签名”（2/3）。 |
+| `to` 与 `data` | 初始化时的委托调用 | 通常由 SDK 设为 `address(0)` 和 `"0x"`；高级场景可用于部署时顺便委托调用其他合约做批量配置。 |
+| `fallbackHandler` | 默认 Fallback 处理器 | 必须参数。通常由前端默认设为官方 `CompatibilityFallbackHandler` 地址。 |
+| `paymentToken`、`payment` 等 | 部署费用退还 | 由中继（Relayer）工具设定，用于在部署时将一定的代币付给代付 Gas 的中继者。 |
+
+**安全拦截机制**：
+`Safe` 的单例（Singleton）合约在部署时，其自身的 `constructor` 会硬编码执行 `threshold = 1`。因为 `setup()` 内部严格校验了必须且仅能在 `threshold == 0` 时执行，这就防止了有人直接对底层实现合约调用 `setup` 将其劫持。
 
 ```mermaid
 sequenceDiagram
@@ -330,6 +347,115 @@ sequenceDiagram
     end
     Factory-->>User: 返回 proxy 地址并 emit ProxyCreation
 ```
+
+#### 工厂创建接口对照
+
+`SafeProxyFactory` 对外暴露 4 个创建接口。它们的共同点是：**都支持 CREATE2 + 可选 initializer 原子初始化**；差异主要集中在两个维度：
+
+1. **地址语义**：是否把 `chainId` 纳入 salt，从而决定地址是否跨链一致
+2. **事件语义**：是否额外发出带 `initializer` / `saltNonce` / `chainId` 的扩展事件，方便链下索引
+
+| 地址策略 \\ 事件策略 | 普通事件 | 扩展事件（L2） |
+|---|---|---|
+| **跨链同地址** | `createProxyWithNonce` | `createProxyWithNonceL2` |
+| **当前链唯一地址** | `createChainSpecificProxyWithNonce` | `createChainSpecificProxyWithNonceL2` |
+
+进一步展开如下：
+
+| 函数 | salt 是否包含 `chainId` | 地址是否可跨链复用 | 额外事件 | 典型用途 |
+|---|---:|---:|---|---|
+| `createProxyWithNonce` | 否 | 是 | `ProxyCreation` | 标准创建；希望不同链上可得到相同 Safe 地址 |
+| `createProxyWithNonceL2` | 否 | 是 | `ProxyCreationL2` | 标准创建，但希望事件里额外记录 `initializer` 与 `saltNonce` |
+| `createChainSpecificProxyWithNonce` | 是 | 否 | `ProxyCreation` | 只希望当前链上唯一，不想跨链同地址 |
+| `createChainSpecificProxyWithNonceL2` | 是 | 否 | `ChainSpecificProxyCreationL2` | 当前链唯一，同时事件里保留完整创建上下文 |
+
+这里有两个容易混淆的点：
+
+- **`L2` 后缀不影响地址计算**：它只是在普通版基础上多发一个更完整的事件，便于浏览器、索引器、前端恢复部署上下文。
+- **真正影响地址的是 `chainId` 是否进入 salt**：`createProxyWithNonce*` 可以跨链复用地址，而 `createChainSpecificProxyWithNonce*` 会把地址绑定到当前链。
+
+#### 选型建议
+
+如果从产品与工程角度做默认选择，可以按下面这套判断：
+
+- **默认优先 `createProxyWithNonceL2`**：
+  适合大多数产品化场景。既保留“多链同地址”能力，又让链上事件足够完整，方便索引、排障与审计。
+- **使用 `createProxyWithNonce`**：
+  当你只关心最简创建流程，不依赖事件恢复创建参数时。
+- **使用 `createChainSpecificProxyWithNonce*`**：
+  只有在你明确不想要跨链同地址时再使用，比如某条链专用治理 Safe、管理员 Safe、或地址本身带有链内治理语义的场景。
+- **带 `L2` 还是普通版**：
+  这不是“部署行为”开关，而是“链下可观测性”开关。想让索引器更容易恢复创建上下文，就选带 `L2` 的版本。
+
+归根到底，这 4 个接口并不是 4 种不同的“部署能力”，而是 4 种不同的**地址命名策略 + 事件可观测性策略**组合。
+
+#### CREATE2 Salt 计算图
+
+下图展示了这 4 个接口在 salt 计算上的本质区别：
+
+```mermaid
+flowchart TD
+    A["initializer"] --> B["keccak256(initializer)"]
+    C["saltNonce"] --> D["拼接 salt 输入"]
+    B --> D
+
+    D --> E{"是否为 chain-specific?"}
+
+    F["getChainId()"] --> G["keccak256(keccak256(initializer), saltNonce, chainId)"]
+    D --> H["keccak256(keccak256(initializer), saltNonce)"]
+
+    E -->|否| H
+    E -->|是| G
+
+    H --> I["createProxyWithNonce / createProxyWithNonceL2"]
+    G --> J["createChainSpecificProxyWithNonce / createChainSpecificProxyWithNonceL2"]
+
+    I --> K["CREATE2(factory, salt, proxyCreationCode + singleton)"]
+    J --> K
+```
+
+这个图同时说明了两个设计点：
+
+- **`initializer` 必须参与地址计算**：这样地址就和 owners / threshold / fallback handler 等初始化配置强绑定，而不是只和 `saltNonce` 绑定。
+- **`chainId` 只在 chain-specific 版本参与计算**：因此它解决的是“地址是否跨链复用”的问题，而不是初始化能力或事件能力的问题。
+
+#### 同一组参数在不同链上的地址结果对比
+
+下面这张图把“同样的 `_singleton`、`initializer`、`saltNonce`”分别放到不同链上，直观看出两类接口的地址语义差异：
+
+```mermaid
+flowchart LR
+    subgraph P1["参数固定"]
+        A["_singleton = S"]
+        B["initializer = I"]
+        C["saltNonce = N"]
+    end
+
+    subgraph X["createProxyWithNonce*（不含 chainId）"]
+        X1["Ethereum\nsalt = keccak256(keccak256(I), N)\naddress = 0xABC..."]
+        X2["Arbitrum\nsalt = keccak256(keccak256(I), N)\naddress = 0xABC..."]
+        X3["Polygon\nsalt = keccak256(keccak256(I), N)\naddress = 0xABC..."]
+    end
+
+    subgraph Y["createChainSpecificProxyWithNonce*（含 chainId）"]
+        Y1["Ethereum\nsalt = keccak256(keccak256(I), N, 1)\naddress = 0xAAA..."]
+        Y2["Arbitrum\nsalt = keccak256(keccak256(I), N, 42161)\naddress = 0xBBB..."]
+        Y3["Polygon\nsalt = keccak256(keccak256(I), N, 137)\naddress = 0xCCC..."]
+    end
+
+    A --> X1
+    A --> Y1
+    B --> X2
+    B --> Y2
+    C --> X3
+    C --> Y3
+```
+
+这张图想表达的核心很简单：
+
+- **`createProxyWithNonce*`**：同一组参数在不同链上会导出**相同地址**，适合“跨链统一钱包身份”的产品体验。
+- **`createChainSpecificProxyWithNonce*`**：同一组参数在不同链上会导出**不同地址**，适合“每条链都是独立治理实体”的场景。
+- `L2` 后缀不改变上面的地址结果，它只影响事件是否带更多创建元数据。
 
 ### 3.2 主交易执行
 
@@ -486,6 +612,49 @@ flowchart TD
 
 ### 4.2 签名验证系统
 
+#### 签名的整体结构（编码协议）
+
+Safe 支持多种签名类型，所有签名在传入合约时被**合并成单一的 `bytes` 参数**，随 `execTransaction` 调用一同提交。
+
+**基本规则：**
+- 每条签名有**固定的 65 字节头部**：`{64 字节签名数据}{1 字节签名类型（v）}`
+- 若某种签名类型需要额外动态数据（如 EIP-1271 的验证字节流），则追加到所有固定头部的末尾，用偏移量（offset）定位。
+- **所有签名必须按签名者地址升序（非 checksum 格式）拼接**，`checkNSignatures` 依赖此规则做去重检查。
+
+| 签名类型 | `v` 值 | 固定部分结构 | 动态部分 |
+|---|---|---|---|
+| ECDSA（标准） | 27 或 28 | `{r(32)}{s(32)}{v(1)}` | 无 |
+| `eth_sign` | > 30（实际 v+4） | `{r(32)}{s(32)}{v(1)}` | 无 |
+| 合约签名（EIP-1271） | 0 | `{verifier地址(32)}{动态数据偏移(32)}{0x00(1)}` | `{数据长度(32)}{签名字节流}` |
+| 预验证签名 | 1 | `{validator地址(32)}{忽略(32)}{0x01(1)}` | 无 |
+| P-256（EIP-7951） | 2 | `{声明的owner(32)}{动态数据偏移(32)}{0x02(1)}` | `{sig_r}{sig_s}{qx}{qy}` |
+
+#### 各类型签名详解
+
+**ECDSA 签名（v = 27/28）**
+
+标准的 `ecrecover` 路径。`r`、`s`、`v` 三者合计 65 字节，无需动态数据。合约直接调用 `ecrecover(txHash, v, r, s)` 恢复出签名者地址，与 owner 列表比对。
+
+**`eth_sign` 签名（v > 30）**
+
+`eth_sign` 会在消息哈希前自动拼接 EIP-191 前缀（`"\x19Ethereum Signed Message:\n32"`）再签名。为了让合约能识别这个分支，签名者在构造时将原始 `v`（27/28）加 4，传入合约后再减 4 还原，再以 EIP-191 前缀哈希为输入调用 `ecrecover`。
+
+**合约签名 EIP-1271（v = 0）**
+
+适用于签名者本身是一个合约（如另一个 Safe）。
+- 固定部分：`r` 字段存放 verifier 合约地址，`s` 字段存放指向动态区的偏移量。
+- 动态部分：追加在所有固定头部之后，包含实际的签名字节流，由 verifier 合约的 `isValidSignature` 方法消费。
+- 也可以通过 `signMessage` 在链上将某条消息标记为"已全员同意"，省去动态字节流。
+
+**预验证签名（v = 1）**
+
+无需在调用时提交签名内容，而是依赖**链上提前记录**：
+- 某个 owner 调用 `approveHash(txHash)` 后，`approvedHashes[owner][txHash] = 1`，之后这条记录即可充当签名。
+- 若 `executor`（即发起 `execTransaction` 的 `msg.sender`）本身是 owner，则无需预先 `approveHash`，合约自动认为其已授权。
+- 固定部分：`r` 字段存放 validator 地址，`s` 字段填充为 0（忽略）。
+
+#### `checkNSignatures` 验证流程
+
 `checkNSignatures` 是 Safe 多签验证的核心枢纽。它逐条读取 `signatures` 中的 65 字节静态头部，并按 `v` 值决定后续验证路径：
 
 ```mermaid
@@ -502,15 +671,15 @@ flowchart TD
     C2 --> C3[调用 owner.isValidSignature]
 
     D --> D1[r 中取 owner 地址]
-    D1 --> D2{executor == owner 或<br/>approvedHashes[owner][hash] != 0}
+    D1 --> D2{"executor == owner 或<br/>approvedHashes[owner][hash] != 0"}
 
     E --> E1[r 中取声明 owner]
     E1 --> E2[s 指向动态区<br/>读取 sig_r sig_s qx qy]
     E2 --> E3[由 qx qy 派生地址]
     E3 --> E4[p256Verify]
 
-    F --> F1[ecrecover(dataHash)]
-    G --> G1[ecrecover(EIP-191 前缀哈希)]
+    F --> F1["ecrecover(dataHash)"]
+    G --> G1["ecrecover(EIP-191 前缀哈希)"]
 
     C3 --> H[owner 合法性与严格升序检查]
     D2 --> H
@@ -523,19 +692,170 @@ flowchart TD
 - **EIP-7951 / RIP-7212（P-256）**：Safe 在 `v = 2` 的签名分支中调用 `address(0x100)` 预编译验证 secp256r1（P-256）签名。
 - **EIP-7702**：`OwnerManager` 继承 `EIP7702`，用于检测当前执行是否处于 delegated account 上下文。
 
-### 4.3 Gas 估算与退款
+#### 完整签名字节流示例
 
-Safe 实现了 Relayer 场景下的 Gas 补偿逻辑：
+假设一笔 2/3 多签交易，三个签名者分别用 ECDSA、EIP-1271 合约签名和预验证签名，最终传入 `execTransaction` 的 `signatures` 参数（签名者地址 `0x1 < 0x2 < 0x3`，按升序排列）如下：
 
-- **计算**：`payment = (gasUsed + baseGas) * min(gasPrice, tx.gasprice)`（原生币）或 `(gasUsed + baseGas) * gasPrice`（ERC20）。
-- **支付**：通过 `handlePayment` 将款项转给 `refundReceiver`（0 则 tx.origin）。
-- **条件**：只有 `gasPrice > 0` 时才会进入退款逻辑；`gasPrice == 0` 时跳过 `handlePayment`。
-- **保证**：若内部目标调用失败但外层 Safe 交易未 revert，且 `gasPrice > 0`，退款仍会发生；若整笔 `execTransaction` 最终 revert，则退款也会回滚。
-- **特殊模式**：当 `safeTxGas == 0 && gasPrice == 0` 时，Safe 进入 `estimateGas` 友好的特殊路径；若目标调用失败，会直接冒泡 revert data，而不是继续执行后续事件与 Guard 流程。
+```text
+"0x" +
+// 签名者 0x1：EIP-1271 合约签名（固定部分，v=0）
+"000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000c300" +
+// 签名者 0x2：预验证签名（固定部分，v=1）
+"0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000001" +
+// 签名者 0x3：标准 ECDSA 签名（固定部分，v=0x1c=28）
+"bde0b9f486b1960454e326375d0b1680243e031fd4fb3f070d9a3ef9871ccfd57d1a653cffb6321f889169f08e548684e005f2b0c3a6c06fba4c4a68f5e006241c" +
+// EIP-1271 动态数据（length + data）
+"000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000deadbeef"
+```
 
-**模拟执行 (Simulation)**：
+### 4.3 Gas 与费用机制
+
+Safe 的 gas 设计要同时解决两个问题：
+
+1. **如何控制 Safe 内部那次真正的目标调用消耗多少 gas**
+2. **如果交易由 relayer 代发，Safe 如何安全地补偿执行成本**
+
+因此，`SafeTx` 中除了业务参数 `to/value/data/operation` 外，还额外引入了 `safeTxGas`、`baseGas`、`gasPrice`、`gasToken`、`refundReceiver` 五个“执行预算 + 费用结算”字段。
+
+#### 关键字段总览
+
+| 字段 | 作用 | 什么时候生效 | 典型设置 |
+|------|------|--------------|----------|
+| `safeTxGas` | Safe 内部执行目标调用时使用的 gas 预算 | `execute(...)` 阶段 | relayer 场景下精确设置；估算模式可设 `0` |
+| `baseGas` | 不属于目标调用本身、但应计入补偿的固定 gas 成本 | `handlePayment(...)` 阶段 | 由 SDK/前端估算签名校验、交易数据等开销 |
+| `gasPrice` | 退款单价，同时也是“是否退款”的开关 | `gasPrice > 0` 时进入退款逻辑 | owner 自发交易通常设 `0`，relayer 模式设正值 |
+| `gasToken` | 退款使用的资产 | `handlePayment(...)` 阶段 | `address(0)` 表示原生币，非零表示 ERC20 |
+| `refundReceiver` | 退款接收人 | `handlePayment(...)` 阶段 | 通常是 relayer；为 `0` 时退给 `tx.origin` |
+
+可以把这五个字段理解为一份由 owner 预先签名确认的“费用协议”：
+
+- **执行预算**：这笔 Safe 交易内部最多打算消耗多少 gas（`safeTxGas`）
+- **固定成本**：除了目标调用本身，还要把哪些外层成本一起算进去（`baseGas`）
+- **结算价格**：按什么单价报销（`gasPrice`）
+- **结算资产**：用 ETH 还是 ERC20 付（`gasToken`）
+- **收款地址**：补偿打给谁（`refundReceiver`）
+
+#### 在 `execTransaction` 中的生效顺序
+
+```mermaid
+flowchart TD
+    A[进入 execTransaction] --> B[Gas 充足性检查]
+    B --> C{gasPrice > 0}
+    C -->|是| D[按 safeTxGas 执行目标调用]
+    C -->|否| E[传递几乎全部剩余 gas]
+    D --> F[统计 gasUsed]
+    E --> F
+    F --> G{safeTxGas == 0 且 gasPrice == 0 且执行失败}
+    G -->|是| H[直接 revert<br/>供 eth_estimateGas 使用]
+    G -->|否| I{gasPrice > 0}
+    I -->|是| J[handlePayment<br/>按 gasUsed + baseGas 退款]
+    I -->|否| K[跳过退款]
+    J --> L[emit ExecutionSuccess/Failure]
+    K --> L
+```
+
+这张图反映了一个核心事实：**`safeTxGas` 主要影响执行阶段，`baseGas/gasPrice/gasToken/refundReceiver` 主要影响退款阶段。**
+
+#### 退款公式与两种支付模式
+
+Safe 的退款逻辑统一在 `handlePayment(...)` 中：
+
+- **原生币模式**：`payment = (gasUsed + baseGas) * min(gasPrice, tx.gasprice)`
+- **ERC20 模式**：`payment = (gasUsed + baseGas) * gasPrice`
+
+之所以 ETH 模式取 `min(gasPrice, tx.gasprice)`，是为了防止 relayer 人为把链上 `tx.gasprice` 设得极高，从而多拿退款；而 ERC20 模式下，链上无法知道该 token 与 gas 成本的真实汇率，因此只能直接按签名里约定的 `gasPrice` 计算。
+
+#### `safeTxGas` 的三种常见语义
+
+**1. `gasPrice > 0`：退款模式**
+
+- Safe 会严格按 `safeTxGas` 去执行内部目标调用。
+- 这样 relayer 无法通过“多传 gas、故意多烧 gas”来提高可报销金额。
+- 即使内部目标调用失败，只要外层 `execTransaction` 没有整体回滚，Safe 仍会支付退款。
+- 失败交易的 `nonce` 依然会消耗，因此不能原样重试。
+
+**2. `gasPrice == 0 && safeTxGas > 0`：无退款、但指定最低执行预算**
+
+- Safe 不会报销 gas，通常表示 owner 自己发交易。
+- 这时 `safeTxGas` 更像一个“最低可用 gas 下界”，Safe 在执行前仍会检查外层 gas 是否足够。
+- 若设置过低，内部调用可能 OOG，但 nonce 仍会前进，导致该笔签名交易无法再次原样执行。
+
+**3. `gasPrice == 0 && safeTxGas == 0`：估算友好模式**
+
+- Safe 会把几乎所有剩余 gas 都传给内部调用。
+- 如果内部调用失败，Safe 不会吞掉错误，而是直接冒泡 revert data。
+- 这样钱包或 SDK 调用 `eth_estimateGas` 时，就能更准确地找到“刚好成功”的最小 gas。
+- 由于整笔交易回滚，这种失败不会消耗 nonce，因此未来仍可重试。
+
+#### `baseGas` 为什么单独存在
+
+`baseGas` 的意义在于：**退款不应只覆盖目标合约执行成本，还应覆盖 Safe 框架本身的外层成本。**
+
+典型包括：
+
+- EIP-712 哈希与签名校验
+- 交易 calldata 的基础开销
+- Guard 前后检查
+- 退款计算与转账本身的开销
+
+如果没有 `baseGas`，relayer 只能拿回目标调用内部消耗的 gas，而 Safe 在签名校验和外围流程上的消耗会变成 relayer 的净损失，元交易模式就难以成立。
+
+#### 两种典型使用场景
+
+| 场景 | 推荐设置 | 效果 |
+|------|----------|------|
+| owner 自己提交交易 | `gasPrice = 0`，`gasToken = 0`，`refundReceiver = 0` | 不退款，自己承担链上 gas |
+| relayer 代发交易 | `gasPrice > 0`，`refundReceiver = relayer` | Safe 用 ETH 或 ERC20 补偿执行者 |
+
+#### 常见误区
+
+- `safeTxGas` **不是**外层以太坊交易的 gas limit，而是 **Safe 内部调用目标合约时的 gas 参数**。
+- `gasPrice = 0` 并不表示“这笔交易不消耗 gas”，只表示 **Safe 不会报销**。
+- `refundReceiver = 0` 并不是“不退款”，而是 **默认退给 `tx.origin`**。
+- 使用 ERC20 退款时，`gasPrice` 本质上是 owner 与 relayer 事先协商好的结算单价，不代表链上真实市场价格。
+
+#### 外层交易 gas limit vs Safe 内部 `safeTxGas`
+
+这两个概念很容易混淆，但它们属于**两层不同的调用上下文**：
+
+```mermaid
+flowchart TD
+    A[EOA / Relayer 发起以太坊交易] --> B[外层 tx gas limit]
+    B --> C[调用 SafeProxy.execTransaction]
+    C --> D[Safe 先做签名校验 / Guard / 事件 / 退款准备]
+    D --> E[Safe.execute to target]
+    E --> F[safeTxGas 控制这次内部调用]
+
+    subgraph 外层交易
+        B
+        C
+        D
+    end
+
+    subgraph Safe 内部调用
+        E
+        F
+    end
+```
+
+可以用一句话区分：
+
+- **外层 tx gas limit**：EOA 或 relayer 发给 `SafeProxy` 这笔链上交易，最多愿意消耗多少 gas。
+- **`safeTxGas`**：Safe 在内部真正调用目标合约 `to` 时，打算分配多少 gas 给这次 `CALL/DELEGATECALL`。
+
+二者的关系是：
+
+- 外层 gas limit 必须**覆盖整个 Safe 流程**：签名校验、Guard、事件、退款、以及最后的目标调用。
+- `safeTxGas` 只覆盖**最内层目标调用**，不包含签名验证与退款逻辑本身。
+- 因此，即便 `safeTxGas = 100000`，外层交易 gas limit 也通常要远大于 `100000`。
+- 当 `gasPrice > 0` 时，Safe 为了防止 relayer 通过“多烧 gas”多拿补偿，会严格按 `safeTxGas` 执行内部调用。
+- 当 `gasPrice == 0` 时，Safe 对内部调用的 gas 控制会宽松很多；若同时 `safeTxGas == 0`，则基本进入“把剩余 gas 都传下去”的估算友好模式。
+
+#### 模拟执行（Simulation）与 Gas 估算
+
 - `StorageAccessible.simulateAndRevert(target, calldata)` 通过 `delegatecall` 在 Safe 的 storage 上下文中执行**任意目标逻辑**，但不会正常返回，而是把 `success + returndata` 编码进 revert 数据再回滚。
 - `SimulateTxAccessor` 是专门给 `simulateAndRevert` 搭配使用的辅助合约：它内部复用 `Executor.execute` 执行一次 `(to, value, data, operation)`，常被前端、SDK 或调试工具用来预演一次 Safe 风格的调用结果，而不只是服务于 `execTransaction` 单一路径。
+- 因此，Safe 的 gas 体验通常是“先模拟/估算，再生成签名参数，再正式执行”。
 
 ### 4.4 Fallback 体系
 
@@ -651,20 +971,70 @@ sequenceDiagram
 
 Safe 采用固定的存储布局，以支持 Proxy 模式、工具库复用以及版本迁移场景中的兼容性。
 
-| 用途 | 存储位置 / 常量 | 说明 |
-|------|------------------|------|
-| 实现地址 | slot 0 (`singleton`) | Proxy 与 Singleton 共用，必须为首个变量 |
-| 模块链表 | `modules` mapping | SENTINEL_MODULES = 0x1，modules[module] = next |
-| 所有者链表 | `owners` mapping | SENTINEL_OWNERS = 0x1，owners[owner] = next |
-| 所有者数量 | `ownerCount` | |
-| 阈值 | `threshold` | 所需签名数 |
-| 交易 nonce | `nonce` | 每次 execTransaction 用后自增 |
-| 弃用 domain separator | `_deprecatedDomainSeparator` | 保留以兼容布局 |
-| 已签消息 | `signedMessages` mapping | 消息哈希 → 1 表示已全签 |
-| 已批准哈希 | `approvedHashes[owner][hash]` | 用于 v=1 签名 |
-| Fallback Handler | `FALLBACK_HANDLER_STORAGE_SLOT` | keccak256("fallback_manager.handler.address") |
-| Transaction Guard | `GUARD_STORAGE_SLOT` | keccak256("guard_manager.guard.address") |
-| Module Guard | `MODULE_GUARD_STORAGE_SLOT` | keccak256("module_manager.module_guard.address") |
+#### 合约与存储的对应关系
+
+下图展示 `SafeProxy` 和 `Safe`（singleton）如何通过 `delegatecall` 共用同一份 storage，以及每个 slot 来自哪个合约/继承层：
+
+```
+  SafeProxy 合约                       Safe 合约（singleton，仅提供逻辑）
+  ──────────────────                   ─────────────────────────────────────────────
+  contract SafeProxy {                 contract Safe is
+    address singleton; // slot 0         Singleton,          // slot 0: singleton（占位对齐）
+  }                                      ModuleManager,      // slot 1: modules mapping
+                                         OwnerManager,       // slot 2: owners mapping
+                                         ...                 // slot 3: ownerCount
+                                         ...                 // slot 4: threshold
+                                         ...                 // slot 5: nonce
+                                         ...                 // slot 6: _deprecatedDomainSeparator
+                                         ...                 // slot 7: signedMessages
+                                         ...                 // slot 8: approvedHashes
+
+         │                                         │
+         │        delegatecall（逻辑在 Safe）        │
+         ╰──────────────────────────────────────────╯
+                         ↓
+         实际读写的是 SafeProxy 的 storage
+         Safe 的逻辑以 Proxy 的 storage 为上下文执行
+```
+
+**关键约束**：`Safe` 继承链中 `Singleton` 必须排第一，因为它的 `slot 0` 必须与 `SafeProxy.singleton` 精确对齐。一旦继承顺序改变，`delegatecall` 就会把 `singleton` 地址写进错误的 slot，导致 Proxy 指向混乱。
+
+#### EVM Storage 布局全图
+
+```
+EVM Storage（SafeProxy 上下文）
+┌────────┬──────────────────────────────────────┬───────────────────────────────────┐
+│  Slot  │ 变量名                               │ 来源合约 / 说明                    │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   0    │ singleton (address)                  │ SafeProxy / Singleton（必须首位）  │
+│        │                                      │ ← Proxy 与 Safe 共用，对齐关键点   │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   1    │ modules (mapping)                    │ ModuleManager（via SafeStorage）   │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   2    │ owners (mapping)                     │ OwnerManager（via SafeStorage）    │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   3    │ ownerCount (uint256)                 │ OwnerManager                       │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   4    │ threshold (uint256)                  │ OwnerManager                       │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   5    │ nonce (uint256)                      │ Safe.execTransaction 自增          │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   6    │ _deprecatedDomainSeparator (bytes32) │ 废弃，仅占位保证布局向前兼容       │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   7    │ signedMessages (mapping)             │ 链上已全签消息哈希                 │
+├────────┼──────────────────────────────────────┼───────────────────────────────────┤
+│   8    │ approvedHashes (mapping)             │ owner 预批准哈希（v=1 签名路径）   │
+├────────┴──────────────────────────────────────┴───────────────────────────────────┤
+│  随机 Slot（keccak256 哈希，避免与顺序 slot 碰撞）                                 │
+├────────────────────────┬─────────────────────┬───────────────────────────────────┤
+│ 0x6c9a...18d5          │ Fallback Handler    │ keccak256("fallback_manager...")   │
+│ 0x4a20...34c8          │ Transaction Guard   │ keccak256("guard_manager...")      │
+│ 0xb104...9947          │ Module Guard        │ keccak256("module_manager...")     │
+└────────────────────────┴─────────────────────┴───────────────────────────────────┘
+```
+
+> **为什么 Fallback Handler / Guard 用随机 Slot？**
+> 这三个地址是在 Safe v1.x 演进过程中后加入的扩展字段。如果直接追加为 slot 9/10/11，在使用旧布局的迁移场景或工具库（如 `SafeStorage`）中，继承顺序一旦不同就会产生 slot 错位（storage collision）。用 `keccak256(string)` 确定一个几乎不可能与顺序 slot 碰撞的地址，是 EIP-1967 引入的最佳实践，Safe 在扩展字段上沿用了同样的思路。
 
 ### 6.2 链表管理
 
