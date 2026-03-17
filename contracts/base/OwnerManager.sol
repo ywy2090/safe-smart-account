@@ -14,15 +14,15 @@ import {IOwnerManager} from "../interfaces/IOwnerManager.sol";
  * ║                      链表数据结构详解                                     ║
  * ╠═══════════════════════════════════════════════════════════════════════════╣
  * ║                                                                          ║
- * ║  Owner 列表使用 mapping(address => address) 实现单向链表：                ║
+ * ║  Owner 列表使用 mapping(address => address) 实现单向链表：                  ║
  * ║                                                                          ║
  * ║    SENTINEL(0x1) → Owner_A → Owner_B → Owner_C → SENTINEL(0x1)          ║
  * ║                                                                          ║
- * ║  存储结构:                                                                ║
- * ║    owners[SENTINEL] = Owner_A   (头指针)                                  ║
- * ║    owners[Owner_A]  = Owner_B   (A 的下一个)                              ║
- * ║    owners[Owner_B]  = Owner_C   (B 的下一个)                              ║
- * ║    owners[Owner_C]  = SENTINEL  (尾节点，指回哨兵，形成闭环)              ║
+ * ║  存储结构（owners[key] = "key 的后继节点"）:                               ║
+ * ║    owners[SENTINEL] = Owner_A   (头指针：哨兵的下一个 = 第一个 owner)     ║
+ * ║    owners[Owner_A]  = Owner_B   (A 的 next)                               ║
+ * ║    owners[Owner_B]  = Owner_C   (B 的 next)                              ║
+ * ║    owners[Owner_C]  = SENTINEL  (尾节点 next 指回哨兵，形成闭环)         ║
  * ║                                                                          ║
  * ║  为什么选择链表而非动态数组：                                              ║
  * ║    ✓ O(1) 添加 — 头插法，不需要移动元素                                   ║
@@ -40,6 +40,33 @@ import {IOwnerManager} from "../interfaces/IOwnerManager.sol";
  * ║    - address(0): 用作"不在链表中"的标记，不可作为 owner                   ║
  * ║    - address(0x1): 哨兵地址，不可作为 owner                               ║
  * ║    - address(this): 除非处于 EIP-7702 委托上下文，否则不可作为 owner       ║
+ * ║                                                                          ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║                      链表算法步骤说明                                     ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║  【初始化 setupOwners】                                                   ║
+ * ║    从 SENTINEL 开始，按 _owners[0..n-1] 顺序建链，最后让末节点指向       ║
+ * ║    SENTINEL。等价于：先建 SENTINEL→A，再 A→B，再 B→C，最后 C→SENTINEL。  ║
+ * ║                                                                          ║
+ * ║  【头插 addOwnerWithThreshold】                                           ║
+ * ║    1. 新节点 next := 当前头节点（owners[SENTINEL]）                        ║
+ * ║    2. 头指针改为新节点：owners[SENTINEL] := 新节点                        ║
+ * ║    两步顺序不可颠倒，否则会丢失原头节点引用。                              ║
+ * ║                                                                          ║
+ * ║  【删除 removeOwner(prevOwner, owner)】                                   ║
+ * ║    1. prevOwner 的 next 改为 owner 的 next：owners[prevOwner] := owners[owner] ║
+ * ║    2. 将 owner 清出链表：owners[owner] := 0                                ║
+ * ║    这样 prevOwner 直接跳过 owner 指向其后继，owner 不再在链中。            ║
+ * ║                                                                          ║
+ * ║  【替换 swapOwner(prevOwner, oldOwner, newOwner)】                        ║
+ * ║    1. newOwner 的 next := oldOwner 的 next（占住同一逻辑位置）             ║
+ * ║    2. prevOwner 的 next := newOwner                                        ║
+ * ║    3. owners[oldOwner] := 0（标记已移除）                                 ║
+ * ║                                                                          ║
+ * ║  【遍历 getOwners】                                                       ║
+ * ║    current := owners[SENTINEL]，若 current != SENTINEL 则压入数组，      ║
+ * ║    然后 current := owners[current]，直到回到 SENTINEL。                   ║
  * ║                                                                          ║
  * ╚═══════════════════════════════════════════════════════════════════════════╝
  *
@@ -117,7 +144,8 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
         // threshold 至少为 1（Safe 至少需要一个签名）
         if (_threshold == 0) revertWithError("GS202");
 
-        // 构建链表：从 SENTINEL 开始逐个链接
+        // ─── 链表构建算法：顺序建链，SENTINEL → _owners[0] → _owners[1] → ... → SENTINEL ───
+        // currentOwner 始终是「当前链尾」：下一轮要把新节点挂到它后面
         address currentOwner = SENTINEL_OWNERS;
         uint256 ownersLength = _owners.length;
         for (uint256 i = 0; i < ownersLength; ++i) {
@@ -126,11 +154,12 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
             if (owner == currentOwner) revertWithError("GS204");
             // 完整校验：地址有效性 + 链表中不存在
             requireCanAddOwner(owner);
-            // 将 currentOwner 指向新 owner（构建链接）
+            // 链表操作：currentOwner 的 next 指向新节点（即 currentOwner → owner）
             owners[currentOwner] = owner;
+            // 移动链尾指针到新节点，下一轮会在 owner 后面继续挂
             currentOwner = owner;
         }
-        // 最后一个 owner 指向 SENTINEL，形成闭环
+        // 闭环：最后一个 owner 的 next 指回 SENTINEL，遍历时以「回到 SENTINEL」为结束条件
         owners[currentOwner] = SENTINEL_OWNERS;
         ownerCount = ownersLength;
         threshold = _threshold;
@@ -158,7 +187,10 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
      */
     function addOwnerWithThreshold(address owner, uint256 _threshold) public override authorized {
         requireCanAddOwner(owner);
+        // ─── 头插法：新节点插在 SENTINEL 之后，成为新的第一个 owner ───
+        // 1. 新节点的 next = 当前头节点（原第一个 owner），保证不丢链
         owners[owner] = owners[SENTINEL_OWNERS];
+        // 2. 头指针改为新节点（SENTINEL 的 next = 新节点）
         owners[SENTINEL_OWNERS] = owner;
         ++ownerCount;
         emit AddedOwner(owner);
@@ -187,9 +219,10 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
         // 先减 ownerCount 再校验：确保移除后仍能满足新 threshold
         if (--ownerCount < _threshold) revertWithError("GS201");
         requireCanRemoveOwner(prevOwner, owner);
-        // 前驱的 next 跳过被删节点，直接指向被删节点的 next
+        // ─── 链表删除：让 prevOwner 的 next 跳过 owner，直接指向 owner 的后继 ───
+        // prevOwner → owner → next  变为   prevOwner → next
         owners[prevOwner] = owners[owner];
-        // 将被删节点标记为不在链表中
+        // 将 owner 从链表中抹掉：owners[owner]=0 同时表示「不在链中」且 isOwner(owner)=false
         owners[owner] = address(0);
         emit RemovedOwner(owner);
         if (threshold != _threshold) changeThreshold(_threshold);
@@ -216,11 +249,13 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
         requireCanAddOwner(newOwner);
         // 校验 oldOwner 可移除（合法 + prevOwner 确实指向它）
         requireCanRemoveOwner(prevOwner, oldOwner);
-        // 执行替换：newOwner 继承 oldOwner 的后继
+        // ─── 原子替换：在 oldOwner 的位置插入 newOwner，链结构不变 ───
+        // prevOwner → oldOwner → next  变为   prevOwner → newOwner → next
+        // 1. newOwner 的 next = oldOwner 的 next（占住同一逻辑位置）
         owners[newOwner] = owners[oldOwner];
-        // 前驱指向 newOwner
+        // 2. prevOwner 的 next = newOwner
         owners[prevOwner] = newOwner;
-        // 旧 owner 标记为已移除
+        // 3. oldOwner 清出链表（与 removeOwner 一致，便于 isOwner(oldOwner)==false）
         owners[oldOwner] = address(0);
         emit RemovedOwner(oldOwner);
         emit AddedOwner(newOwner);
@@ -327,11 +362,12 @@ abstract contract OwnerManager is EIP7702, SelfAuthorized, IOwnerManager {
     function getOwners() public view override returns (address[] memory) {
         address[] memory array = new address[](ownerCount);
 
+        // ─── 遍历链表：从头节点出发，沿 next 走到回到 SENTINEL 为止 ───
         uint256 index = 0;
-        address currentOwner = owners[SENTINEL_OWNERS];
+        address currentOwner = owners[SENTINEL_OWNERS]; // 第一个 owner（头节点）
         while (currentOwner != SENTINEL_OWNERS) {
             array[index] = currentOwner;
-            currentOwner = owners[currentOwner];
+            currentOwner = owners[currentOwner]; // 移动到下一个节点
             ++index;
         }
         return array;

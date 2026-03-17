@@ -765,6 +765,31 @@ Safe 的退款逻辑统一在 `handlePayment(...)` 中：
 
 之所以 ETH 模式取 `min(gasPrice, tx.gasprice)`，是为了防止 relayer 人为把链上 `tx.gasprice` 设得极高，从而多拿退款；而 ERC20 模式下，链上无法知道该 token 与 gas 成本的真实汇率，因此只能直接按签名里约定的 `gasPrice` 计算。
 
+#### EIP-150 63/64 规则与 gas 充足性校验（GS010）
+
+EIP-150 规定：`CALL` / `DELEGATECALL` 时，子调用最多只能获得当前剩余 gas 的 **63/64**，其余 1/64 保留给当前帧。因此若希望子调用实际拿到至少 `safeTxGas`，执行 `execute` 那一刻的 `gasleft()` 必须满足：
+
+`gasleft() × (63/64) ≥ safeTxGas`  
+⇒ `gasleft() ≥ safeTxGas × (64/63)`。
+
+Safe 在真正执行 `execute` 前会做一次校验（否则 revert `GS010`）：
+
+```text
+gasleft() >= max( (safeTxGas << 6) / 63,  safeTxGas + 2500 ) + 500
+```
+
+- **`(safeTxGas << 6) / 63`** = floor(safeTxGas × 64/63)：保证在 63/64 规则下，子调用能拿到至少 `safeTxGas`。
+- **`safeTxGas + 2500`**：子调用用掉 `safeTxGas` 后，本帧还需约 2500 gas（事件、Guard 后检查等）。
+- **+500**：从校验点到执行 `execute` 之间指令的保守估计。
+
+取两者较大值再加 500，确保既满足 EIP-150，又为本帧收尾留足 gas。
+
+#### 为何必须指定 safeTxGas
+
+- **限制内部执行 gas**：当 `gasPrice > 0` 时，Safe 传给 `execute` 的 gas 就是 `safeTxGas`，relayer 无法通过“多传 gas”让内部调用多烧 gas 从而多拿补偿；补偿上界由 owner 签名锁定。
+- **签名绑定**：`safeTxGas` 在 EIP-712 交易哈希中，relayer 不能篡改，否则签名失效。
+- **补偿可预期**：退款 ≈ (gasUsed + baseGas) × gasPrice，且 gasUsed 以 `safeTxGas` 为 cap，owner 签名时就约定了“为这次执行最多付多少”。
+
 #### `safeTxGas` 的三种常见语义
 
 **1. `gasPrice > 0`：退款模式**
@@ -799,6 +824,37 @@ Safe 的退款逻辑统一在 `handlePayment(...)` 中：
 - 退款计算与转账本身的开销
 
 如果没有 `baseGas`，relayer 只能拿回目标调用内部消耗的 gas，而 Safe 在签名校验和外围流程上的消耗会变成 relayer 的净损失，元交易模式就难以成立。
+
+#### 补偿的触发与资金来源
+
+- **要不要补偿**：完全由 **用户（owner）在签名时定的交易参数** 决定。  
+  - **gasPrice > 0** → 会走 `handlePayment`，对 relayer 做补偿。  
+  - **gasPrice = 0** → 不补偿（owner 自发交易、自己承担链上 gas）。  
+  补偿金额公式中的 `baseGas`、`gasPrice`、`gasToken`、`refundReceiver` 均来自签名，relayer 无法篡改。
+
+- **补偿的钱从哪来**：一律从 **Safe 合约自己的资产** 支出。  
+  - **gasToken = address(0)**：从 Safe 的 **ETH 余额** 通过 `receiver.call{value: payment}("")` 转出；余额不足则退款失败，整笔交易 revert（`GS011`）。  
+  - **gasToken ≠ 0**：从 Safe 在该 **ERC20 合约中的余额** 通过 `transferToken(gasToken, receiver, payment)` 转出；不足或转账失败则 revert（`GS012`）。
+
+因此：**“要不要补、按什么规则补”由用户用交易参数决定；“钱从哪来”是 Safe 合约本身（多签钱包持有的 ETH 或 ERC20）。**
+
+#### 参数填错与 Safe 资产损失风险
+
+这些字段都是 **owner 签名的一部分**，一旦交易被执行，合约会严格按签名参数退款。若用户随意填写或高估，**多付的补偿会从 Safe 转出，造成 Safe 自身损失**，且无法在链上“讨回”（合约不区分善意/恶意填错）。
+
+| 参数 | 填错/滥用带来的风险 | 建议 |
+|------|---------------------|------|
+| **gasPrice** | 设得过高 → 按公式多付给 relayer；ERC20 时尤其危险（链上无法校验代币与 gas 的合理比价） | 使用可信前端/SDK 的推荐值或与 relayer 事先约定；自发交易时设 `0` |
+| **baseGas** | 高估 → 退款公式中 `(gasUsed + baseGas)` 变大，Safe 多付 | 按实际测量或经验值略留余量，不要盲目放大 |
+| **safeTxGas** | 在 `gasPrice > 0` 时设得过大 → 内部调用可消耗更多 gas，`gasUsed` 上限提高，补偿上界变大 | 按目标调用的真实需求设定，relayer 场景下不宜过大 |
+| **gasToken** | 使用不熟悉或流动性差的 ERC20，且 `gasPrice` 设高 → Safe 以不利“汇率”付出大量代币 | 尽量用 ETH 或主流稳定币，并对 `gasPrice` 谨慎设定 |
+| **refundReceiver** | 填成错误或恶意地址 → 补偿打给他人无法追回 | 确认是可信 relayer 或己方地址；为 `0` 时退给 `tx.origin`（即实际发交易的 EOA） |
+
+**防护建议**：
+
+- 由 **可信前端 / Safe 官方 SDK** 根据链上 gas 与目标调用估算并填充这些参数，避免 owner 手填。
+- 多签审批时 **核对 gasPrice、baseGas、safeTxGas、refundReceiver**，尤其在使用 ERC20 或第三方 relayer 时。
+- 若不需 relayer 代付，直接设 **gasPrice = 0**，Safe 不会执行退款，可避免误触发补偿。
 
 #### 两种典型使用场景
 

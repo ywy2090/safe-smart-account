@@ -2,22 +2,20 @@
 pragma solidity >=0.7.0 <0.9.0;
 
 /**
- * @title ERC-1155 Token Receiver Interface
- * @dev The ERC-165 identifier for this interface is 0x4e2312e0.
+ * @title ERC1155TokenReceiver
+ * @notice ERC-1155 安全转账的接收者回调接口：实现后可在 safeTransferFrom / safeBatchTransferFrom 时被 NFT 合约调用以接受或拒绝转账。
+ * @dev ERC-165 接口 ID: 0x4e2312e0。单笔接收需返回 0xf23a6e61，批量接收需返回 0xbc197c81，否则调用方会 revert。
  */
 interface ERC1155TokenReceiver {
     /**
-     * @notice Handle the receipt of a single ERC-1155 token type.
-     * @dev An ERC-1155-compliant smart contract MUST call this function on the token recipient contract, at the end of a `safeTransferFrom` after the balance has been updated.
-     *      This function MUST return `bytes4(keccak256("onERC1155Received(address,address,uint256,uint256,bytes)"))` (i.e. 0xf23a6e61) if it accepts the transfer.
-     *      This function MUST revert if it rejects the transfer.
-     *      Return of any other value than the prescribed keccak256 generated value MUST result in the transaction being reverted by the caller.
-     * @param _operator  The address which initiated the transfer (i.e. msg.sender).
-     * @param _from      The address which previously owned the token.
-     * @param _id        The ID of the token being transferred.
-     * @param _value     The amount of tokens being transferred.
-     * @param _data      Additional data with no specified format.
-     * @return           `bytes4(keccak256("onERC1155Received(address,address,uint256,uint256,bytes)"))`.
+     * @notice 单笔 ERC-1155 安全转账完成后，由代币合约在接收方合约上调用。
+     * @dev 接受时必须返回 bytes4(keccak256("onERC1155Received(...)")) = 0xf23a6e61；拒绝可 revert；返回其他值会导致调用方 revert。
+     * @param _operator 发起转账的地址（msg.sender 为代币合约）。
+     * @param _from 转出方。
+     * @param _id 代币 ID。
+     * @param _value 转账数量。
+     * @param _data 附加数据。
+     * @return 接受时返回 0xf23a6e61。
      */
     function onERC1155Received(
         address _operator,
@@ -28,17 +26,14 @@ interface ERC1155TokenReceiver {
     ) external returns (bytes4);
 
     /**
-     * @notice Handle the receipt of multiple ERC-1155 token types.
-     * @dev An ERC-1155-compliant smart contract MUST call this function on the token recipient contract, at the end of a `safeBatchTransferFrom` after the balances have been updated.
-     *      This function MUST return `bytes4(keccak256("onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)"))` (i.e. 0xbc197c81) if it accepts the transfer(s).
-     *      This function MUST revert if it rejects the transfer(s).
-     *      Return of any other value than the prescribed keccak256 generated value MUST result in the transaction being reverted by the caller.
-     * @param _operator  The address which initiated the batch transfer (i.e. msg.sender).
-     * @param _from      The address which previously owned the token.
-     * @param _ids       An array containing ids of each token being transferred (order and length must match _values array).
-     * @param _values    An array containing amounts of each token being transferred (order and length must match _ids array).
-     * @param _data      Additional data with no specified format.
-     * @return           `bytes4(keccak256("onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)"))`.
+     * @notice 批量 ERC-1155 安全转账完成后，由代币合约在接收方合约上调用。
+     * @dev 接受时必须返回 bytes4(keccak256("onERC1155BatchReceived(...)")) = 0xbc197c81；拒绝可 revert；返回其他值会导致调用方 revert。_ids 与 _values 长度与顺序需一致。
+     * @param _operator 发起批量转账的地址。
+     * @param _from 转出方。
+     * @param _ids 各代币 ID 数组。
+     * @param _values 各代币数量数组（与 _ids 一一对应）。
+     * @param _data 附加数据。
+     * @return 接受时返回 0xbc197c81。
      */
     function onERC1155BatchReceived(
         address _operator,

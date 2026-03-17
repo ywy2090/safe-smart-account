@@ -345,12 +345,23 @@ contract Safe is
             }
         }
 
-        // ── Step 5: Gas 充足性校验 ──
-        // EIP-150 规定：CALL/DELEGATECALL 最多传递当前 gas 的 63/64，保留 1/64 给调用方。
-        // 因此要确保 gasleft() 足够：
-        //   (safeTxGas << 6) / 63  ≈  safeTxGas × 64/63  →  需要的总 gas（含 1/64 保留）
-        //   safeTxGas + 2500       →  执行 gas + 事件发射 gas 的下界
-        //   取两者较大值，再加 500 gas（到达 execute 调用点的开销）
+        // ── Step 5: Gas 充足性校验（EIP-150 63/64 规则）──
+        //
+        // 【背景】EIP-150 规定：CALL/DELEGATECALL 时，子调用最多只能获得「当前剩余 gas」的 63/64，
+        //        其余 1/64 保留给当前帧（用于 return、后续指令等）。因此若希望子调用实际拿到
+        //        至少 safeTxGas，则「执行 execute 那一刻」的 gasleft() 必须 ≥ safeTxGas × (64/63)。
+        //
+        // 【公式】当前行检查时所需的 gas 下界 = max( A, B ) + 500，其中：
+        //
+        //   A = (safeTxGas << 6) / 63  =  floor(safeTxGas × 64/63)
+        //       → 保证执行 execute 时，63/64 × gasleft() ≥ safeTxGas，子调用能拿到至少 safeTxGas。
+        //
+        //   B = safeTxGas + 2500
+        //       → 子调用用掉 safeTxGas，之后还需约 2500 gas 用于本帧后续逻辑（事件、赋值、Guard 等）。
+        //
+        //   +500 → 从本检查点到真正执行 execute 之间的指令所耗 gas 的保守估计。
+        //
+        // 取 max(A, B) 是因为：safeTxGas 大时 A 主导（EIP-150 限制）；safeTxGas 小时 B 主导（后续逻辑至少要 2500）。
         if (gasleft() < ((safeTxGas << 6) / 63).max(safeTxGas + 2500) + 500) revertWithError("GS010");
         {
             // ── Step 6: 执行目标调用 ──
