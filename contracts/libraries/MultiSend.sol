@@ -4,7 +4,41 @@ pragma solidity >=0.7.0 <0.9.0;
 /**
  * @title Multi Send
  * @notice 将多笔交易打包为一次调用；通常由 Safe 通过 DELEGATECALL 调用，在 Safe 上下文中顺序执行每笔子交易。
- * @dev 每笔子交易格式：operation(1) || to(20) || value(32) || dataLength(32) || data。operation 0=CALL，1=DELEGATECALL。任一失败则整体 revert。
+ * @dev
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * transactions 编码方式：紧密打包（packed），非 ABI 编码
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * 使用 packed 编码（等同 abi.encodePacked / solidityPacked），不是 abi.encode。
+ * - ABI 编码：每个参数按 32 字节对齐、有 padding（如 address 占 32 字节）。
+ * - 此处：operation 1 字节、to 20 字节 无 padding，仅 value/dataLength 为 32 字节。
+ *
+ * 为何不用 ABI 编码：
+ *   1. 更省 calldata：单笔至少省 (32-1)+(32-20)=43 字节，多笔累加后 calldata 更小，gas 更低。
+ *   2. 批量场景下差异明显：多笔子交易时，每笔少几十字节会显著降低链上数据与费用（尤其 L2/calldata 计价）。
+ *
+ * 多笔子交易直接拼接：  encoded_tx_1 || encoded_tx_2 || ...
+ *
+ * 单笔子交易布局（每段连续，无分隔符）：
+ *
+ *   offset    length    type      说明
+ *   ─────────────────────────────────────────────────────────────────────────
+ *   0         1        uint8     operation：0 = CALL，1 = DELEGATECALL
+ *   1         20       address   to：目标地址；全 0 时本合约内视为 address(this)
+ *   21        32       uint256   value：仅 CALL 有效（wei），DELEGATECALL 忽略
+ *   53        32       uint256   dataLength：后续 data 的字节数
+ *   85        dataLen  bytes     data：本次调用的 calldata（selector + 参数等）
+ *
+ * 单笔总长 = 85 + dataLength；下一笔从 85 + dataLength 处开始。
+ *
+ * 编码示例（与 src/utils/multisend.ts 一致，必须用 packed 而非 abi.encode）：
+ *   ethers.solidityPacked(["uint8","address","uint256","uint256","bytes"],
+ *                         [operation, to, value, data.length, data])
+ * 多笔：将每笔上述 packed 编码的十六进制拼接后作为 bytes 传入。
+ *
+ * 任一子交易失败则整体 revert，并携带该笔调用的 returndata。
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
  * @author Nick Dodson, Gonçalo Sá, Stefan George, Richard Meissner
  */
 contract MultiSend {
@@ -17,13 +51,13 @@ contract MultiSend {
 
     /**
      * @notice 顺序执行多笔交易，任一笔失败则 revert。
-     * @param transactions 打包编码的多笔交易，每笔格式为：
-     *                     1. _operation_ as a {uint8}, 0 for a `CALL` or 1 for a `DELEGATECALL` (=> 1 byte),
-     *                     2. _to_ as an {address} (=> 20 bytes),
-     *                     3. _value_ as a {uint256} (=> 32 bytes),
-     *                     4. _data_ length as a {uint256} (=> 32 bytes),
-     *                     5. _data_ as {bytes}.
-     *                     See {abi.encodePacked} for more information on packed encoding.
+     * @param transactions 多笔子交易紧密拼接的 bytes。单笔布局（与 assembly 中偏移一致）：
+     *                     [i+0x00] operation  1 字节  (0=CALL, 1=DELEGATECALL)
+     *                     [i+0x01] to        20 字节 (0 表示 address(this))
+     *                     [i+0x15] value     32 字节
+     *                     [i+0x35] dataLength 32 字节
+     *                     [i+0x55] data      dataLength 字节
+     *                     下一笔起始下标 i' = i + 0x55 + dataLength。
      */
     function multiSend(bytes memory transactions) public payable {
         require(address(this) != MULTISEND_SINGLETON, "MultiSend should only be called via delegatecall");

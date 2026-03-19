@@ -17,8 +17,16 @@ contract SignMessageLib is SafeStorage {
     event SignMsg(bytes32 indexed msgHash);
 
     /**
-     * @notice 将 _data 的 EIP-712 消息哈希标记为已签名（signedMessages[hash]=1）。
-     * @param _data 任意数据，调用方需为 Safe 自身（通过 Safe 的 execTransaction 调用本库）。
+     * @notice 将 _data 对应的 EIP-712 SafeMessage 哈希标记为已签名（signedMessages[hash]=1）。
+     * @param _data 待签名的消息，任意字节（无规定编码格式）。库内会先算 getMessageHash(_data)，再写入 signedMessages。
+     *
+     *      编码方式与哈希计算：
+     *      - _data 不做格式约定：可为任意 bytes（如 UTF-8 文本、十六进制、ABI 编码结果、或已哈希的 32 字节等）。
+     *      - 实际写入的为 EIP-712 哈希：getMessageHash(_data) = keccak256(0x19 0x01 || domainSeparator || structHash)，
+     *        其中 structHash = keccak256(SAFE_MSG_TYPEHASH || keccak256(_data))，类型为 SafeMessage(bytes message)。
+     *      - 验证时（含 EIP-1271）必须用与签名时相同的 _data 调用 getMessageHash(_data)，得到同一 hash 后查 signedMessages[hash] 或 isValidSignature(hash, "")。
+     *
+     *      调用方须为 Safe 自身（通过 Safe 的 execTransaction 对本库做 DELEGATECALL）。
      */
     function signMessage(bytes calldata _data) external {
         bytes32 msgHash = getMessageHash(_data);
